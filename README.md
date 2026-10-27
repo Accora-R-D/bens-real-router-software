@@ -30,11 +30,13 @@ then open http://localhost:8020/cam.
 
 ## Deploy
 
-Render web service from this repo (see `render.yaml`):
+The Render service runs this repo's `Dockerfile` (Docker runtime). The build
+imports OpenCascade and the whole router, so a missing system library fails
+the build with its name in the log. No environment variables are needed;
+Render's `PORT` is honoured.
 
-- Build: `pip install -r app/requirements.txt`
-- Start: `bash -c 'cd /opt/render/project/src/app && python -m uvicorn backend.main:app --host 0.0.0.0 --port $PORT'`
-- Python 3.12. No environment variables are needed.
+`render.yaml` describes the same service on Render's native Python runtime,
+for a Blueprint deploy instead of Docker.
 
 Runs single-worker on purpose: the engine applies per-request settings to
 module globals under a lock.
