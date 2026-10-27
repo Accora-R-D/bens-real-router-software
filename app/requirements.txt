@@ -1,0 +1,18 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+# STEP files are dropped onto the page as multipart/form-data.
+python-multipart>=0.0.9
+starlette>=0.37.0
+# OpenCascade, for reading the STEP files. Pinned to the version the fab
+# exporter's flat-pattern extraction was verified against. It drags in vtk,
+# which nothing here uses, but installing it plainly beats a --no-deps split.
+cadquery-ocp==7.9.3.1.1
+shapely>=2.0.0
+numpy>=1.26.0
+pyclipper>=1.3.0
+# The engine's simulate module imports matplotlib at module scope, and
+# router_cam.engine imports simulate, so it is needed to load the CAM at all.
+matplotlib>=3.9.0
+# Tests
+pytest>=8.0.0
+httpx>=0.27.0
