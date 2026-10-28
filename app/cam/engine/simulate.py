@@ -17,6 +17,15 @@ from matplotlib.collections import LineCollection
 import matplotlib.animation as animation
 
 RAPID_RATE = 12000.0   # assumed rapid traverse mm/min (for time estimate only)
+# The router does not cut at the programmed feed through corners and short
+# moves: it slows for each change of direction and speeds up again. Fitted to
+# the machine (2026-10-28): Base Plate (1), 12 mm, timed at 45 min against a
+# 31 min estimate that ignored this; the same setting puts the Oct-26 53-part
+# sheet at ~1.5 h, which matches "an hour or two and still going". Corners are
+# taken the way grbl-style planners take them (junction deviation), arcs as
+# their chords.
+MACHINE_ACCEL = 380.0          # mm/s^2
+JUNCTION_DEV = 0.05            # mm
 OUT = Path(__file__).parent / "out"
 
 
@@ -76,6 +85,54 @@ def parse_segments(text):
 TOOL_CHANGE_MIN = 20.0 / 60.0   # per M06: carousel swap + spindle back to speed
 
 
+def _planned_minutes(segs, feeds, accel=None, dev=None):
+    """Time for the moves with the machine's acceleration: each move ramps up
+    towards its feed and down again for the next corner, the corner speed set
+    by how sharp it is (junction deviation). A rapid starts and ends at rest."""
+    a = MACHINE_ACCEL if accel is None else accel
+    dv = JUNCTION_DEV if dev is None else dev
+    n = len(segs)
+    if not n:
+        return 0.0
+    L, U, vmax = [], [], []
+    for s, f in zip(segs, feeds):
+        dx, dy, dz = s["x1"] - s["x0"], s["y1"] - s["y0"], s["z1"] - s["z0"]
+        d = math.sqrt(dx * dx + dy * dy + dz * dz)
+        L.append(d)
+        U.append((dx / d, dy / d, dz / d) if d > 1e-12 else (0.0, 0.0, 0.0))
+        vmax.append(max(f, 1e-6) / 60.0)                  # mm/s
+    vj = [0.0] * (n + 1)                                 # speed entering move i
+    for i in range(1, n):
+        if segs[i]["kind"] == "rapid" or segs[i - 1]["kind"] == "rapid":
+            continue
+        u0, u1 = U[i - 1], U[i]
+        c = -(u0[0] * u1[0] + u0[1] * u1[1] + u0[2] * u1[2])
+        c = max(-1.0, min(1.0, c))
+        if c < -0.999999:                                  # straight on
+            v = 1e9
+        else:
+            h = math.sqrt(0.5 * (1.0 - c))
+            v = math.sqrt(a * dv * h / (1.0 - h)) if h < 0.999999 else 0.0
+        vj[i] = min(v, vmax[i - 1], vmax[i])
+    for i in range(n - 1, -1, -1):                         # can it stop in time?
+        vj[i] = min(vj[i], math.sqrt(vj[i + 1] ** 2 + 2 * a * L[i]))
+    for i in range(n):                                     # can it get up to speed?
+        vj[i + 1] = min(vj[i + 1], math.sqrt(vj[i] ** 2 + 2 * a * L[i]))
+    t = 0.0
+    for i in range(n):
+        v0, v1, vm, d = vj[i], vj[i + 1], vmax[i], L[i]
+        if d <= 0:
+            continue
+        da = (vm * vm - v0 * v0) / (2 * a)
+        dd = (vm * vm - v1 * v1) / (2 * a)
+        if da + dd <= d:                                   # reaches the feed
+            t += (vm - v0) / a + (vm - v1) / a + (d - da - dd) / vm
+        else:                                              # never does
+            vp = math.sqrt(max((2 * a * d + v0 * v0 + v1 * v1) / 2, 0.0))
+            t += max(vp - v0, 0) / a + max(vp - v1, 0) / a
+    return t / 60.0
+
+
 def stats(segs, tool_changes: int = 0):
     """Distances and an estimated cycle time for a parsed program.
 
@@ -84,8 +141,8 @@ def stats(segs, tool_changes: int = 0):
     all costed at the profile feed, and the hundreds of vertical retracts and
     approaches cost nothing. Now each move is timed at its own feed over its
     true 3-D length, rapids include their Z travel, and each tool change adds
-    TOOL_CHANGE_MIN. Still an estimate: acceleration on short moves is not
-    modelled, so dense engraving and small arcs run a little slower than this."""
+    TOOL_CHANGE_MIN. Since 2026-10-28 the machine's acceleration is in it too
+    (see MACHINE_ACCEL): a 31 min estimate had run 45 min on the machine."""
     def L(s): return math.hypot(s["x1"]-s["x0"], s["y1"]-s["y0"])
     def L3(s): return math.sqrt((s["x1"]-s["x0"])**2 + (s["y1"]-s["y0"])**2 + (s["z1"]-s["z0"])**2)
     cut = sum(L(s) for s in segs if s["kind"] == "cut")
@@ -93,13 +150,9 @@ def stats(segs, tool_changes: int = 0):
     plunge = sum(abs(s["z1"]-s["z0"]) for s in segs if s["kind"] == "plunge")
     cut_f = next((s["f"] for s in segs if s["kind"] == "cut" and s["f"]), 3672.0)
     pl_f = next((s["f"] for s in segs if s["kind"] == "plunge" and s["f"]), 350.0)
-    t = 0.0                                               # minutes
-    for s in segs:
-        if s["kind"] == "rapid":
-            t += L3(s) / RAPID_RATE
-        else:
-            f = s["f"] or (pl_f if s["kind"] == "plunge" else cut_f)
-            t += L3(s) / f
+    feeds = [RAPID_RATE if s["kind"] == "rapid"
+             else (s["f"] or (pl_f if s["kind"] == "plunge" else cut_f)) for s in segs]
+    t = _planned_minutes(segs, feeds)
     t += max(0, int(tool_changes)) * TOOL_CHANGE_MIN
     xs = [s["x1"] for s in segs] + [s["x0"] for s in segs]
     ys = [s["y1"] for s in segs] + [s["y0"] for s in segs]

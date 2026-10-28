@@ -1879,8 +1879,8 @@ async function ensureSim() {
 }
 
 // The cycle-time estimate for the program on show: each move at its own feed,
-// rapids with their Z travel, ~20 s per tool change. Acceleration on short
-// moves is not modelled, so dense engraving runs a little longer than this.
+// slowed for corners and short moves by the machine's measured acceleration,
+// rapids with their Z travel, ~20 s per tool change (simulate.stats).
 function fmtMinutes(m) {
   const t = Math.max(0, Math.round(m));
   return t >= 60 ? `${Math.floor(t / 60)} h ${String(t % 60).padStart(2, "0")} min` : `${t} min`;
@@ -1890,8 +1890,8 @@ function simTimeLine(key) {
   const est = prog && prog.manifest && prog.manifest.est_minutes;
   if (!est) return "";
   return `<p class="sim-time"><b>Estimated cut time: ${fmtMinutes(est)}</b>
-    <span class="note">— ${esc(progLabel(prog))}, from the program's feeds and rapids,
-    tool changes included; allow a little extra for acceleration on short moves.</span></p>`;
+    <span class="note">— ${esc(progLabel(prog))}, with the machine slowing for corners
+    and short moves (matched to a timed cut), tool changes included.</span></p>`;
 }
 
 function buildSim(key, V) {
