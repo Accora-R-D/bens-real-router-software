@@ -91,6 +91,8 @@ FINISH_STEPPED = False     # False = one full-depth lap; True = step it down lik
 BALL_TOOL = None           # loaded ball-nose seat; tool_map["surface"] overrides
 SURFACE_SCALLOP = 0.10     # mm cusp height target for the ball finish stepover
 SURFACE_LEAVE = 0.5        # mm stock the roughing leaves for the finish pass
+SURFACE_TERRACE_STEP = 1.0 # mm steps when a 3D job is roughed with no ball nose
+SURFACE_STEEP_DEG = 35.0   # 3D jobs: faces steeper than this get a cross ball pass
 SKIP_PROFILE = False       # pockets-only: machine pockets/holes/cut-outs but NEVER the
                            # outer profile (part stays attached to a pre-cut blank).
                            # The outline is still used to position the part — just not cut.
@@ -1441,14 +1443,104 @@ def compute_jobs(name, loops, base=0.0, tool_map=None):
             print(f"    !! sculpted region on {name} has no heightfield — SKIPPED")
             continue
         ball = tm.get("surface") if tm.get("surface") in TOOLS else BALL_TOOL
-        if ball not in TOOLS or TOOLS[ball]["dia"] <= 0:
+        no_ball = ball not in TOOLS or TOOLS[ball]["dia"] <= 0
+        rough_t = TOOL_PREF[0] if TOOL_PREF and TOOL_PREF[0] in TOOLS else None
+        if no_ball and not (lp.get("rough_without_ball") and rough_t is not None):
             print(f"    !! sculpted region on {name} but no ball-nose tool loaded — "
                   f"SKIPPED (set a seat's type to 'ballnose' in Tools & feeds)")
             continue
         import surfacing as SF
         g = dict(grid, ox=grid["ox"] - minx + base, oy=grid["oy"] - miny + base)
         smask = lp.get("mask")
-        rough_t = TOOL_PREF[0] if TOOL_PREF and TOOL_PREF[0] in TOOLS else None
+        if no_ball:
+            # A 3D job with no ball nose fitted: rough to the surface itself in
+            # fine steps with the flat cutter and stop — a terraced shape at
+            # size, with only the ball finish missing.
+            # Full-depth layers first, then the fine steps only where those
+            # layers left material — on the slopes — not over the whole area.
+            import numpy as np
+            flat = SF.Cutter("flat", TOOLS[rough_t]["dia"])
+            coarse = float(MAT["max_step"])
+            fine = min(coarse, SURFACE_TERRACE_STEP)
+            rpaths, tgt, _ri = SF.raster_rough(zmap, g, flat, stock_top=float(stop),
+                                               stepdown=coarse, stock_to_leave=0.0,
+                                               mask=smask)
+            levels, zl = [], float(stop)
+            while zl > np.nanmin(tgt) + 1e-9:
+                zl = max(float(np.nanmin(tgt)), zl - coarse)
+                levels.append(zl)
+            # Fine raster only where the face is gentle: on anything steeper the
+            # waterlines below sit closer together than the cutter is wide and
+            # leave nothing, and lanes there are hundreds of short hops.
+            gy_, gx_ = np.gradient(np.where(np.isfinite(tgt), tgt, float(stop)), g["res"])
+            gentle = np.hypot(gx_, gy_) < math.tan(math.radians(SURFACE_STEEP_DEG))
+            upper = float(stop)
+            for lower in levels:
+                band = (np.isfinite(tgt) & (tgt > lower + 1e-6) & (tgt < upper - 1e-6)
+                        & gentle)
+                if smask is not None:
+                    band &= smask
+                if band.any():
+                    fp, _t, _fi = SF.raster_rough(zmap, g, flat, stock_top=upper,
+                                                  stepdown=fine, stock_to_leave=0.0,
+                                                  mask=band)
+                    rpaths += fp
+                upper = lower
+            # Raster lanes are 0.4 x dia apart, so on a steep face each layer
+            # stops a lane short of it — up to 7 mm of height on a 70-degree
+            # side. A waterline at every fine level follows the face exactly:
+            # the contour of the flat cutter's drop field at that height is
+            # where its edge just touches the surface.
+            # The roughing field models the cutter as a square (safe, quick), which
+            # holds it ~0.4 x radius off diagonal faces; the waterlines use the
+            # round cutter, half a cell oversize so sampling cannot let it gouge.
+            import contourpy
+            round_flat = SF.Cutter("bull", TOOLS[rough_t]["dia"] + g["res"], corner=1e-6)
+            wfield = np.minimum(SF.drop_field(zmap, round_flat, g["res"]), float(stop))
+            gx = g["ox"] + np.arange(tgt.shape[1]) * g["res"]
+            gy = g["oy"] + np.arange(tgt.shape[0]) * g["res"]
+            cgen = contourpy.contour_generator(gx, gy, np.where(np.isfinite(wfield), wfield, float(stop)))
+            floor = float(np.nanmin(tgt))
+            # A contour point is interpolated between cells and the field is not
+            # linear there, so on a steep face it can sit a cell too close. Each
+            # point is checked against the real disc of the cutter on the
+            # height map, and any that would touch above the level is dropped.
+            Rr = TOOLS[rough_t]["dia"] / 2.0
+            K = int(math.ceil(Rr / g["res"])) + 1
+            ko = np.arange(-K, K + 2)
+            zsafe = np.where(np.isfinite(zmap), zmap, -np.inf)
+
+            def disc_max(line):
+                bi = np.floor((line[:, 0] - g["ox"]) / g["res"]).astype(int)
+                bj = np.floor((line[:, 1] - g["oy"]) / g["res"]).astype(int)
+                ci = bi[:, None, None] + ko[None, None, :]
+                cj = bj[:, None, None] + ko[None, :, None]
+                cx = g["ox"] + ci * g["res"] - line[:, 0][:, None, None]
+                cy = g["oy"] + cj * g["res"] - line[:, 1][:, None, None]
+                inside = cx * cx + cy * cy <= Rr * Rr
+                zz = zsafe[np.clip(cj, 0, zsafe.shape[0] - 1), np.clip(ci, 0, zsafe.shape[1] - 1)]
+                return np.where(inside, zz, -np.inf).max(axis=(1, 2))
+
+            zl = float(stop) - fine
+            while zl > floor + 1e-6:
+                for line in cgen.lines(zl):
+                    if smask is not None:
+                        ii = np.clip(np.round((line[:, 0] - g["ox"]) / g["res"]).astype(int), 0, tgt.shape[1] - 1)
+                        jj = np.clip(np.round((line[:, 1] - g["oy"]) / g["res"]).astype(int), 0, tgt.shape[0] - 1)
+                        keep = smask[jj, ii]
+                    else:
+                        keep = np.ones(len(line), dtype=bool)
+                    keep &= disc_max(line) <= zl + 0.02
+                    for s, e in SF._runs(keep):
+                        if e - s >= 2:
+                            rpaths.append([(float(x), float(y), zl) for x, y in line[s:e]])
+                zl -= fine
+            if rpaths:
+                jobs.append(("SURFACE", rpaths, None, rough_t))
+            print(f"    ! 3D part {name}: no ball nose loaded — ROUGHED ONLY with "
+                  f"Ø{TOOLS[rough_t]['dia']:g}mm, slopes in {fine:g}mm steps so they "
+                  f"come out terraced (load the ball nose for the finish)")
+            continue
         if rough_t is not None:
             flat = SF.Cutter("flat", TOOLS[rough_t]["dia"])
             rpaths, _tgt, rinfo = SF.raster_rough(
@@ -1458,8 +1550,28 @@ def compute_jobs(name, loops, base=0.0, tool_map=None):
             if rpaths:
                 jobs.append(("SURFACE", rpaths, None, rough_t))
         bcut = SF.Cutter("ball", TOOLS[ball]["dia"])
-        fpaths, _drop, finfo = SF.raster_finish(zmap, g, bcut, scallop=SURFACE_SCALLOP,
-                                                mask=smask)
+        if lp.get("steep_cross"):
+            # 3D jobs: lanes exactly on grid rows (between rows Z is read from
+            # the nearest one, which on a 70-degree side digs in ~0.3 mm), and a
+            # second pass across the first on steep faces — lanes running along
+            # a steep side leave ridges a stepover tall up its height.
+            import numpy as np
+            res = g["res"]
+            so = max(res, math.floor(SF.stepover_for_scallop(bcut.R, SURFACE_SCALLOP) / res) * res)
+            fpaths, _drop, finfo = SF.raster_finish(zmap, g, bcut, stepover=so, mask=smask)
+            gy_, gx_ = np.gradient(zmap, res)
+            steep = np.hypot(gx_, gy_) > math.tan(math.radians(SURFACE_STEEP_DEG))
+            steep = SF._max_filter_square(np.where(steep, 1.0, -np.inf),
+                                          int(math.ceil(bcut.R / res))) > 0
+            if smask is not None:
+                steep &= smask
+            if steep.any():
+                xpaths, _d, _xi = SF.raster_finish(zmap, g, bcut, stepover=so, along="y",
+                                                   mask=steep)
+                fpaths += xpaths
+        else:
+            fpaths, _drop, finfo = SF.raster_finish(zmap, g, bcut, scallop=SURFACE_SCALLOP,
+                                                    mask=smask)
         if fpaths:
             jobs.append(("SURFACE", fpaths, None, ball))
             print(f"    i sculpted region on {name}: roughed with "

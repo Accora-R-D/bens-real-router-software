@@ -132,6 +132,25 @@ def place_on_sheet(keepout, placed, innerW, innerH, rotations=(0, 1, 2, 3), edge
     return best
 
 
+def _convex_hull(pts):
+    """Convex hull (CCW) of 2-D points — Andrew's monotone chain."""
+    pts = sorted(set(pts))
+    if len(pts) < 3:
+        return pts
+    def cross(o, a, b):
+        return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
+    lower, upper = [], []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
 def prepare_part(name, loops, meta=None):
     """Translate a part's loops to origin and build its jobs + keep-out polygon.
     `loops` = list of {role, pts, circle[, depth]} (extract.part_features shape).
@@ -191,6 +210,17 @@ def prepare_part(name, loops, meta=None):
     out_tools = [t for (role, _p, _pd, t) in jobs if role == "OUTSIDE" and t in TOOLS]
     ptool_r = (TOOLS[out_tools[0]]["dia"] / 2.0) if out_tools else R
     keep = max(offset(outer, ptool_r + MIN_GAP/2), key=lambda p: len(p))   # buffered keep-out
+    # 3D surfacing lanes run past the outline (so the ball reaches the foot of a
+    # slope) — further than the profile cutter does. Reserve their reach too, or
+    # a neighbour nested at the profile gap gets surfaced. No-op without SURFACE.
+    spts = [(x, y) for (role, paths, _pd, _t) in jobs if role == "SURFACE"
+            for path in paths for x, y, _z in path]
+    if spts:
+        sr = max(TOOLS[t]["dia"] / 2.0 for (role, _p, _pd, t) in jobs
+                 if role == "SURFACE" and t in TOOLS)
+        reach = offset(_convex_hull(spts), sr + MIN_GAP/2)
+        if reach:
+            keep = max(poly_union([keep] + reach), key=lambda p: abs(_poly_area(p)))
     maxdim = max(w, h)
     # Outline in job-local coords (compute_jobs shifts the part min-corner to 0). Kept so
     # the swap-shift extent and the plan preview have the part edge even in pockets-only

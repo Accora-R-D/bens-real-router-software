@@ -175,7 +175,7 @@ def cam_loops(edges) -> list:
     return loops
 
 
-def cam_parts_and_diag(step_parts, decisions=None, names=None):
+def cam_parts_and_diag(step_parts, decisions=None, names=None, mode="flat"):
     """`(parts, diag)` — the CAM tuples, and a row for EVERY wood part.
 
     The diagnostics matter as much as the parts. The CAM engine fills in a
@@ -183,6 +183,9 @@ def cam_parts_and_diag(step_parts, decisions=None, names=None):
     on the sheet shows up as "did not fit" instead of quietly not being cut.
     Without a row per part there is nothing for it to annotate, and a missing
     part becomes invisible.
+
+    `mode` "3d" reads every part as a shaped heightfield (`wood_3d`) instead
+    of a plate; a flat job never goes near that code.
     """
     want = names if names is not None else wood_names(decisions)
     out, diag = [], []
@@ -195,7 +198,11 @@ def cam_parts_and_diag(step_parts, decisions=None, names=None):
                "qty": qty, "status": "pending", "reason": ""}
         diag.append(row)
 
-        loops, geom, why = _read_geometry(p)
+        if mode == "3d":
+            from .wood_3d import read_geometry_3d
+            loops, geom, why = read_geometry_3d(p)
+        else:
+            loops, geom, why = _read_geometry(p)
         if not any(lp["role"] == "OUTSIDE" for lp in loops):
             row["status"] = "failed"
             row["reason"] = why or "no outer profile could be read"
@@ -208,7 +215,7 @@ def cam_parts_and_diag(step_parts, decisions=None, names=None):
                    holes=sum(1 for lp in loops if lp["role"] == "DRILL"),
                    pockets=len(pockets),
                    pocket_source="solid" if geom else "flat outline")
-        if geom is None:
+        if geom is None or mode == "3d":
             row["reason"] = why or ""
 
         if geom:
@@ -223,6 +230,10 @@ def cam_parts_and_diag(step_parts, decisions=None, names=None):
             "qty": qty,
             "thickness": thickness,
         }
+        if mode == "3d":
+            # The label would be placed by the footprint and could land on a
+            # slope, engraving air or half-letters. Not engraved for now.
+            meta["no_engrave"] = True
         # Two-sided 2.5D parts: read the part AGAIN from its other face. That
         # read comes back in the far face's own outward frame — the mirrored
         # view the machine sees once the part is flipped — and drives the

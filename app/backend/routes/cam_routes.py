@@ -32,7 +32,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from backend.services import wood_cam_service as wood
@@ -261,9 +261,35 @@ def ingest_uploads(files: "list[tuple[str, bytes]]") -> dict:
             "title": upload_title([f for f, _d in files])}
 
 
+def _parse_mode(mode) -> str:
+    return "3d" if str(mode or "").strip().lower() == "3d" else "flat"
+
+
+def suggest_3d(parts) -> "list[str]":
+    """Names of parts that look shaped (`wood_3d.looks_3d`) — offered a 3D job
+    from a flat one. A part that cannot be judged is simply not suggested."""
+    from backend.services.wood_3d import looks_3d
+    out = []
+    for p in parts:
+        try:
+            if getattr(p, "shape", None) is not None and looks_3d(p.shape):
+                out.append(p.name)
+        except Exception:                               # noqa: BLE001
+            pass
+    return out
+
+
+def _mode_fields(job) -> dict:
+    return {"mode": job.get("mode") or "flat",
+            "suggest_3d": job.get("suggest_3d") or []}
+
+
 @router.post("/upload")
-async def cam_upload(files: "list[UploadFile]" = File(...)) -> JSONResponse:
-    """Start a standalone CAM job from dropped STEP files."""
+async def cam_upload(files: "list[UploadFile]" = File(...),
+                     mode: str = Form("flat")) -> JSONResponse:
+    """Start a standalone CAM job from dropped STEP files. `mode` is the job
+    type chosen before dropping: "flat" (boards — the everyday path) or "3d"
+    (shaped parts, `wood_3d`)."""
     payload = []
     for f in files:
         payload.append((f.filename or "part.step", await f.read()))
@@ -273,6 +299,10 @@ async def cam_upload(files: "list[UploadFile]" = File(...)) -> JSONResponse:
         job = await run_in_threadpool(ingest_uploads, payload)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    job["mode"] = _parse_mode(mode)
+    # A flat job that has shaped parts in it says so, and offers the switch.
+    job["suggest_3d"] = (await run_in_threadpool(suggest_3d, job["_step_parts"])
+                         if job["mode"] == "flat" else [])
     job_id = "camup-" + uuid.uuid4().hex[:10]
     job["_touched"] = time.monotonic()
     _JOBS[job_id] = job
@@ -282,7 +312,18 @@ async def cam_upload(files: "list[UploadFile]" = File(...)) -> JSONResponse:
     await run_in_threadpool(give_back)       # the STEP reader's scratch memory
     out.update({"job_id": job_id, "warning": wood.missing_pocket_warning(),
                 "upload_errors": job.get("upload_errors") or []})
+    out.update(_mode_fields(job))
     return JSONResponse(out)
+
+
+@router.post("/mode/{job_id}")
+async def cam_mode(job_id: str, request: Request) -> JSONResponse:
+    """Switch a job between flat and 3D. The parts are already read, so this
+    is just the job type; the next Nest reads them the new way."""
+    body = await request.json()
+    job = _job(job_id)
+    job["mode"] = _parse_mode((body or {}).get("mode"))
+    return JSONResponse(_mode_fields(job))
 
 
 @router.post("/wood/{job_id}")
@@ -325,6 +366,7 @@ async def cam_wood_get(job_id: str) -> JSONResponse:
     summary = await run_in_threadpool(lambda: wood.summary(_step_parts(job_id), names=names))
     summary["warning"] = wood.missing_pocket_warning()
     summary["title"] = job.get("title") or ""
+    summary.update(_mode_fields(job))
     return JSONResponse(summary)
 
 
@@ -456,7 +498,8 @@ async def cam_generate(job_id: str, request: Request) -> JSONResponse:
     # posting and simulating — runs on a worker thread, not the event loop: the
     # server stays able to answer the page (and everyone else) meanwhile.
     parts, diag = await run_in_threadpool(wood.cam_parts_and_diag,
-                                          _step_parts(job_id), names=names)
+                                          _step_parts(job_id), names=names,
+                                          mode=job.get("mode") or "flat")
     if not parts:
         raise HTTPException(status_code=422,
                             detail="No wood part yielded a usable outline.")

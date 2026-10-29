@@ -271,7 +271,7 @@ def _nest_one(parts_loops, material: Material, tools: ToolTable,
                   "the waste in the middle of each one is left in")
         for name, loops, meta in parts_loops:
             m = dict(meta)
-            m["engrave"] = engrave_on
+            m["engrave"] = engrave_on and not meta.get("no_engrave")
             m["engrave_height"] = getattr(material, "engrave_height", 25.0)
             m["tool_map"] = tm
             m["engrave_offset"] = epos.get(name) or [0.0, 0.0]
