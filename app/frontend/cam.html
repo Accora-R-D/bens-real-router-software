@@ -1979,7 +1979,7 @@ function buildSim(key, V) {
     </div>
     ${simTimeLine(key)}
     <p class="note" style="margin-top:10px">Drag to orbit · wheel to zoom.
-      Cutter Ø${(V.R * 2).toFixed(1)}mm, ${V.grid.res}mm grid.</p>`;
+      ${V.grid.res}mm grid.</p>`;
   const gl = initGL(key, V);
   if (!gl) $("simbody").innerHTML =
     `<div class="banner err">This browser could not start WebGL2, so the 3D
@@ -2000,39 +2000,53 @@ function initGL(key, V) {
   const pos = new Float32Array(gw * gh * 2);
   for (let j = 0, k = 0; j < gh; j++)
     for (let i = 0; i < gw; i++, k += 2) { pos[k] = i; pos[k + 1] = j; }
-  const idx = [];
-  for (let j = 0; j < gh - 1; j++)
+  // One typed array, filled in place: a plain JS array of 6 indices per cell
+  // costs ten times the memory, and at 2M cells that was the limit on detail.
+  const IDX = new ((gw * gh > 65535) ? Uint32Array : Uint16Array)((gw - 1) * (gh - 1) * 6);
+  for (let j = 0, q = 0; j < gh - 1; j++)
     for (let i = 0; i < gw - 1; i++) {
       const a = j * gw + i, b = a + 1, c = a + gw, d = c + 1;
-      idx.push(a, c, b, b, c, d);
+      IDX[q++] = a; IDX[q++] = c; IDX[q++] = b; IDX[q++] = b; IDX[q++] = c; IDX[q++] = d;
     }
-  const IDX = (gw * gh > 65535) ? new Uint32Array(idx) : new Uint16Array(idx);
 
   const vs = `#version 300 es
   in vec2 cell; uniform sampler2D hmap; uniform vec2 gsize;
-  uniform mat4 mvp; uniform float res, top, thick;
-  out float vh; out vec3 vn;
-  float hAt(vec2 c){ return texture(hmap, (c+0.5)/gsize).r; }
+  uniform mat4 mvp; uniform float res, top;
+  out vec2 vc;
   void main(){
-    float h = hAt(cell);
-    float hx = hAt(cell+vec2(1.0,0.0)) - hAt(cell-vec2(1.0,0.0));
-    float hy = hAt(cell+vec2(0.0,1.0)) - hAt(cell-vec2(0.0,1.0));
-    vn = normalize(vec3(-hx, -hy, 2.0*res));
-    vh = (top - h) / max(thick, 0.001);
+    float h = texelFetch(hmap, ivec2(cell), 0).r;
+    vc = cell;
     vec3 p = vec3((cell.x - gsize.x*0.5)*res, (cell.y - gsize.y*0.5)*res, h);
     gl_Position = mvp * vec4(p, 1.0);
   }`;
+  // Shaded per pixel, not per grid point: the slope is read from the height
+  // field at the pixel's own spot, interpolated between cells and taken over
+  // two cells either way, so a carved floor reads as a surface instead of the
+  // speckle of every cell's stair-step.
   const fs = `#version 300 es
   precision highp float;
-  in float vh; in vec3 vn; out vec4 o;
+  uniform sampler2D hmap; uniform vec2 gsize; uniform float res, top, thick;
+  in vec2 vc; out vec4 o;
+  float hc(ivec2 c){ return texelFetch(hmap, clamp(c, ivec2(0), ivec2(gsize) - 1), 0).r; }
+  float hb(vec2 p){
+    vec2 f = fract(p); ivec2 i = ivec2(floor(p));
+    return mix(mix(hc(i), hc(i + ivec2(1,0)), f.x),
+               mix(hc(i + ivec2(0,1)), hc(i + ivec2(1,1)), f.x), f.y);
+  }
   void main(){
+    float h = hb(vc);
+    float hx = hb(vc + vec2(2.0, 0.0)) - hb(vc - vec2(2.0, 0.0));
+    float hy = hb(vc + vec2(0.0, 2.0)) - hb(vc - vec2(0.0, 2.0));
+    vec3 n = normalize(vec3(-hx, -hy, 4.0 * res));
     vec3 L = normalize(vec3(0.4, -0.6, 0.8));
-    float d = clamp(dot(normalize(vn), L), 0.0, 1.0);
+    float d = clamp(dot(n, L), 0.0, 1.0);
+    float s = pow(clamp(dot(n, normalize(L + vec3(0.0, 0.0, 1.0))), 0.0, 1.0), 40.0);
     // uncut board vs machined floor, so depth of cut reads at a glance
+    float vh = (top - h) / max(thick, 0.001);
     vec3 board = vec3(0.83, 0.72, 0.52);
     vec3 floorc = vec3(0.42, 0.55, 0.48);
     vec3 c = mix(board, floorc, smoothstep(0.001, 0.02, vh));
-    o = vec4(c * (0.35 + 0.75*d), 1.0);
+    o = vec4(c * (0.32 + 0.72 * d) + 0.08 * s, 1.0);
   }`;
   const prog = link(gl, vs, fs);
   if (!prog) return null;
@@ -2062,32 +2076,45 @@ function initGL(key, V) {
   gl.uniform1f(gl.getUniformLocation(prog, "res"), res);
   gl.uniform1f(gl.getUniformLocation(prog, "top"), top);
   gl.uniform1f(gl.getUniformLocation(prog, "thick"), Math.max(top, 1));
+  // (gsize, res and top are shared by both shaders under the same names)
   gl.uniform1i(gl.getUniformLocation(prog, "hmap"), 0);
   const uMVP = gl.getUniformLocation(prog, "mvp");
   gl.enable(gl.DEPTH_TEST);
 
-  // ---- carving: stamp a flat-bottomed disc of the cutter radius
-  const Rc = V.R, rc = Math.ceil(Rc / res);
-  function stamp(x, y, z) {
+  // ---- carving: stamp each move's own cutter — flat disc, ball, or 90° vee.
+  // Older payloads name no tools: everything is then the profile cutter's disc.
+  const SHAPES = V.tools || {}, toolOf = V.path.tool || null;
+  const flatR = V.R;
+  function shapeAt(i) {
+    const s = toolOf ? SHAPES[String(toolOf[i])] : null;
+    if (!s) return { R: flatR, kind: "flat" };
+    // a V-bit's diameter is its tip; carve the cone out to a sensible width
+    return s.kind === "vee" ? { R: Math.max(s.R, 6), kind: "vee" } : s;
+  }
+  function stamp(x, y, z, sh) {
+    const Rc = sh.R, rc = Math.ceil(Rc / res), R2 = Rc * Rc;
     const ci = (x - ox) / res, cj = (y - oy) / res;
     const i0 = Math.max(0, Math.floor(ci - rc)), i1 = Math.min(gw - 1, Math.ceil(ci + rc));
     const j0 = Math.max(0, Math.floor(cj - rc)), j1 = Math.min(gh - 1, Math.ceil(cj + rc));
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
-        const dx = (i - ci) * res, dy = (j - cj) * res;
-        if (dx * dx + dy * dy > Rc * Rc) continue;
+        const dx = (i - ci) * res, dy = (j - cj) * res, r2 = dx * dx + dy * dy;
+        if (r2 > R2) continue;
+        const zz = sh.kind === "ball" ? z + Rc - Math.sqrt(R2 - r2)
+                 : sh.kind === "vee" ? z + Math.sqrt(r2) : z;
         const k = j * gw + i;
-        if (H[k] > z) H[k] = z;
+        if (H[k] > zz) H[k] = zz;
       }
     }
   }
   function carveSeg(a, b) {
+    const sh = shapeAt(b);
     const d = Math.hypot(px[b] - px[a], py[b] - py[a]);
     const n = Math.max(1, Math.ceil(d / (res * 0.7)));
     for (let s = 1; s <= n; s++) {
       const t = s / n;
       stamp(px[a] + (px[b] - px[a]) * t, py[a] + (py[b] - py[a]) * t,
-            pz[a] + (pz[b] - pz[a]) * t);
+            pz[a] + (pz[b] - pz[a]) * t, sh);
     }
   }
   let cursor = 0;

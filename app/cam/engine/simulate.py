@@ -45,11 +45,16 @@ def parse_segments(text):
     """Return motion segments: dict(kind, x0,y0,z0, x1,y1,z1, feed).
     kind in {rapid, cut, plunge}. G02/G03 arcs are tessellated into cut segments."""
     num = re.compile(r"([GXYZFIJ])(-?\d+\.?\d*)")
-    g = 0; x = y = z = 0.0; f = 0.0
+    toolchg = re.compile(r"T(\d+)\s*M0?6\b")
+    g = 0; x = y = z = 0.0; f = 0.0; t = 0
     segs = []
     started = False
     for raw in text.splitlines():
         line = re.sub(r"^N\d+", "", raw.split(";")[0])
+        tc = toolchg.search(line)
+        if tc:
+            t = int(tc.group(1))                 # the seat cutting from here on
+            continue
         if re.search(r"G53|G28", line):          # skip homing / machine moves
             continue
         toks = {m.group(1): float(m.group(2)) for m in num.finditer(line)}
@@ -62,7 +67,7 @@ def parse_segments(text):
             px, py = x, y
             for qx, qy in pts:
                 segs.append({"kind": "cut", "x0": px, "y0": py, "z0": z,
-                             "x1": qx, "y1": qy, "z1": nz, "f": f})
+                             "x1": qx, "y1": qy, "z1": nz, "f": f, "t": t})
                 px, py = qx, qy
             x, y, z = nx, ny, nz
             continue
@@ -76,7 +81,7 @@ def parse_segments(text):
             else:
                 kind = "cut"
             segs.append({"kind": kind, "x0": x, "y0": y, "z0": z,
-                         "x1": nx, "y1": ny, "z1": nz, "f": f})
+                         "x1": nx, "y1": ny, "z1": nz, "f": f, "t": t})
         x, y, z = nx, ny, nz
         started = True
     return segs

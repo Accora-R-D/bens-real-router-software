@@ -159,9 +159,19 @@ def configured(material: Material, tools: ToolTable):
             restore_config(snap)
 
 
-def _viewer_payload(nc_path: Path, top: float):
+def _viewer_payload(nc_path: Path, top: float, tools: "ToolTable | None" = None):
     segs = simulate.parse_segments(nc_path.read_text())
     pts = viewer3d.decimate(segs)
+    # Each seat's cutter as the viewer carves it: a ball nose leaves a round
+    # bottom and a V-bit a 90 deg groove; everything else is a flat disc. The
+    # viewer used to carve every move with the profile cutter's flat disc, so a
+    # ball-nose finish came out as a flat-bottomed staircase.
+    shapes = {}
+    for s in (tools.seats if tools else []):
+        if s.loaded:
+            kind = ("ball" if s.kind == "ballnose"
+                    else "vee" if s.kind in ("vee", "chamfer") else "flat")
+            shapes[str(s.seat_no)] = {"R": round(max(s.diameter_mm, 0.0) / 2, 3), "kind": kind}
     cutpts = [(s["x0"], s["y0"]) for s in segs if s["kind"] != "rapid"] + \
              [(s["x1"], s["y1"]) for s in segs if s["kind"] != "rapid"]
     if not cutpts:
@@ -178,12 +188,16 @@ def _viewer_payload(nc_path: Path, top: float):
     # and memory, not payload: 1M cells is ~1M vertices and a 4MB height texture,
     # comfortably within WebGL2 on the workshop machines, and visibly crisper on
     # small features than the old 300k.
-    MAX_CELLS = 1_000_000
-    res = round(max(0.35, math.sqrt(extx*exty / MAX_CELLS)), 3)
+    # 2M cells at 0.2 mm (a 280 mm square at full detail) since the viewer
+    # builds its index buffer as one typed array and shades per pixel.
+    MAX_CELLS = 2_000_000
+    res = round(max(0.2, math.sqrt(extx*exty / MAX_CELLS)), 3)
     return {"grid": {"gw": int(math.ceil((maxx-minx)/res)), "gh": int(math.ceil((maxy-miny)/res)),
                      "res": res, "ox": round(minx, 2), "oy": round(miny, 2), "top": round(top, 2)},
             "path": {"px": [p[0] for p in pts], "py": [p[1] for p in pts],
-                     "pz": [p[2] for p in pts], "cut": [p[3] for p in pts]},
+                     "pz": [p[2] for p in pts], "cut": [p[3] for p in pts],
+                     "tool": [p[4] for p in pts]},
+            "tools": shapes,
             "R": cs.R}
 
 
@@ -444,7 +458,7 @@ def _nest_one(parts_loops, material: Material, tools: ToolTable,
                               "and the mould plug, drop the part in upside down, "
                               "and do NOT move the sheet"],
                  "layout": [],
-                 "viewer": _viewer_payload(side2_files[0], material.thickness_mm),
+                 "viewer": _viewer_payload(side2_files[0], material.thickness_mm, tools),
                  "nc_files": [{"name": f.name, "nc": f.read_text()}
                               for f in side2_files],
                  "job_sheet": simulate.jobsheet_md(side2_files[0].name, man2, st2)}
@@ -460,7 +474,7 @@ def _nest_one(parts_loops, material: Material, tools: ToolTable,
     return {"thickness": material.thickness_mm, "sheets": len(files),
             "overridden": overridden,
             "nc": nc_text, "manifest": manifest, "warnings": warnings,
-            "layout": layout, "viewer": _viewer_payload(nc_path, material.thickness_mm),
+            "layout": layout, "viewer": _viewer_payload(nc_path, material.thickness_mm, tools),
             "nc_files": [{"name": f.name, "nc": f.read_text()} for f in files],
             "job_sheet": job_sheet, "side2": side2}
 

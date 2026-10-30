@@ -12,23 +12,28 @@ from simulate import parse_segments
 from cam_syntec import R, OUT
 
 RES3D = 1.5      # height-field cell size (mm) — finer = smoother edges, heavier
-DEC = 0.5        # toolpath point decimation distance (mm)
+DEC = 0.25       # toolpath point decimation distance (mm)
+DEC_Z = 0.02     # ...or this much change in height. At 0.1 a ball-nose surface
+                 # reached the viewer flattened into 0.1 mm steps: grainy.
 
 
 def decimate(segs):
-    """Ordered points [x,y,z,cutflag] where cutflag = the move INTO that point."""
+    """Ordered points [x,y,z,cutflag,tool] where cutflag and tool belong to the
+    move INTO that point."""
     pts = []
     if not segs:
         return pts
     s0 = segs[0]
-    pts.append([round(s0["x0"], 2), round(s0["y0"], 2), round(s0["z0"], 2), 0])
+    pts.append([round(s0["x0"], 3), round(s0["y0"], 3), round(s0["z0"], 3), 0, s0.get("t", 0)])
     lk = pts[0]
     for s in segs:
         cut = 0 if s["kind"] == "rapid" else 1
+        t = s.get("t", 0)
         x, y, z = s["x1"], s["y1"], s["z1"]
         d = math.hypot(x-lk[0], y-lk[1])
-        if d >= DEC or cut != (lk[3]) or abs(z-lk[2]) > 0.1 or s is segs[-1]:
-            p = [round(x, 2), round(y, 2), round(z, 2), cut]
+        if (d >= DEC or cut != lk[3] or t != lk[4] or abs(z-lk[2]) > DEC_Z
+                or s is segs[-1]):
+            p = [round(x, 3), round(y, 3), round(z, 3), cut, t]
             pts.append(p); lk = p
     return pts
 
