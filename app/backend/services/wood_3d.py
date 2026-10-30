@@ -45,6 +45,8 @@ WINDOW_MM = 10.0         # heightfield margin round the footprint
 REACH_MM = 6.0           # surfacing lanes run this far past the footprint, so
                          # the ball reaches the foot of every slope
 OVERHANG_WARN_PCT = 1.0  # more undercut than this is reported
+HOLE_MIN_AREA_MM2 = 0.5  # a footprint hole smaller than this is a seam between
+                         # triangles, not a hole (Ø0.8 mm; no cutter goes in)
 
 # A part is suggested for a 3D job when it carries this much sloped or curved
 # face, counting only faces wider than SUGGEST_MIN_WIDTH_MM — so a chamfer or
@@ -129,7 +131,25 @@ def _footprint(mesh, frame):
     shape = union_all(polys).buffer(0)
     if shape.geom_type == "MultiPolygon":
         shape = max(shape.geoms, key=lambda g: g.area)
-    return shape.simplify(0.01, preserve_topology=True)
+    return _drop_specks(shape.simplify(0.01, preserve_topology=True))
+
+
+def _drop_specks(foot):
+    """The footprint without holes that are only seams between triangles.
+
+    Unioning thousands of projected facets can leave a zero-area hole where
+    their edges almost meet. On the Linux server Part 1 (7), a solid tapered
+    block, came out with one: three points at the same spot, read as a
+    cut-out, and reported as "slot too narrow for any loaded tool — SKIPPED".
+    A real through-hole has area and some width; a speck has neither.
+    """
+    from shapely.geometry import Polygon
+    keep = [ring for ring in foot.interiors
+            if Polygon(ring).area >= HOLE_MIN_AREA_MM2
+            and not Polygon(ring).buffer(-0.05).is_empty]
+    if len(keep) == len(foot.interiors):
+        return foot
+    return Polygon(foot.exterior, keep)
 
 
 def _ring(coords):

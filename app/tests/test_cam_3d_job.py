@@ -293,3 +293,19 @@ def test_the_page_offers_the_choice_before_the_drop():
     assert 'name="jobmode" value="flat" checked' in page
     assert 'name="jobmode" value="3d"' in page
     assert 'form.append("mode"' in page and "/cam/mode/" in page
+
+
+def test_a_seam_between_triangles_is_not_a_hole():
+    """Part 1 (7), a solid tapered block, read on the Linux server with a
+    zero-area hole in its footprint (three points at one spot) and was
+    reported as a slot too narrow for any tool. Specks go; real holes stay."""
+    from shapely.geometry import Polygon
+    from backend.services import wood_3d as W3
+    outer = [(0, 0), (150, 0), (150, 80), (0, 80)]
+    speck = [(31.21, 29.14), (31.2100001, 29.14), (31.21, 29.1400001)]
+    hole = [(60, 30), (70, 30), (70, 40), (60, 40)]
+    foot = Polygon(outer, [speck, hole])
+    clean = W3._drop_specks(foot)
+    assert len(clean.interiors) == 1
+    assert Polygon(clean.interiors[0]).area == pytest.approx(100.0)
+    assert W3._drop_specks(Polygon(outer, [hole])).equals(Polygon(outer, [hole]))
