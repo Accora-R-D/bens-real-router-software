@@ -40,8 +40,8 @@
   --f-path:        #6f8279;
   --f-mould:       #d97be0;   /* two-sided flip mould: the part drops in for pass 2 */
   --f-mould-fill:  rgba(217,123,224,.12);
-  --f-surface:     #facc15;   /* 3D surfaced region (ball-nose raster) */
-  --f-surface-fill:rgba(250,204,21,.15);
+  --f-surface:     #e5e7eb;   /* 3D surfaced region (ball-nose raster); silver, clear of every other hue */
+  --f-surface-fill:rgba(229,231,235,.14);
   --f-origin:      #f0705f;   /* machine origin, axes and the border line */
 }
 * , *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -330,10 +330,10 @@ g.part.bad .outline { stroke: var(--error); }
         <div id="modepick" role="radiogroup" aria-label="Job type">
           <label class="check"><input type="radio" name="jobmode" value="flat" checked>
             <span><b>Flat parts</b> <span class="note">— boards: profiles, holes,
-              pockets. The usual job.</span></span></label>
+              pockets.</span></span></label>
           <label class="check"><input type="radio" name="jobmode" value="3d">
             <span><b>3D parts</b> <span class="note">— shaped parts (sloped or
-              curved faces) surfaced from the top with the ball nose.</span></span></label>
+              curved faces).</span></span></label>
         </div>
         <div id="dropzone" tabindex="0" role="button"
              aria-label="Drop STEP files of wood parts here, or click to choose">
