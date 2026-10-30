@@ -1990,6 +1990,7 @@ function initGL(key, V) {
   const cv = $("simcanvas");
   const gl = cv.getContext("webgl2", { antialias: true });
   if (!gl) return null;
+  cv.style.imageRendering = "auto";        // let the browser filter the downscale
 
   const { gw, gh, res, ox, oy, top } = V.grid;
   const px = V.path.px, py = V.path.py, pz = V.path.pz, cut = V.path.cut;
@@ -2038,15 +2039,24 @@ function initGL(key, V) {
     float hx = hb(vc + vec2(2.0, 0.0)) - hb(vc - vec2(2.0, 0.0));
     float hy = hb(vc + vec2(0.0, 2.0)) - hb(vc - vec2(0.0, 2.0));
     vec3 n = normalize(vec3(-hx, -hy, 4.0 * res));
-    vec3 L = normalize(vec3(0.4, -0.6, 0.8));
-    float d = clamp(dot(n, L), 0.0, 1.0);
-    float s = pow(clamp(dot(n, normalize(L + vec3(0.0, 0.0, 1.0))), 0.0, 1.0), 40.0);
-    // uncut board vs machined floor, so depth of cut reads at a glance
+    // Lit like a material, not a diagram: a warm key light, a cool fill from
+    // the other side, sky-to-ground ambient, a soft highlight, all in linear
+    // light and gamma-corrected at the end.
+    vec3 key = normalize(vec3(0.45, -0.55, 0.75));
+    vec3 fill = normalize(vec3(-0.6, 0.5, 0.45));
+    float dk = max(dot(n, key), 0.0), df = max(dot(n, fill), 0.0);
+    float sky = 0.5 + 0.5 * n.z;
+    vec3 hv = normalize(key + vec3(0.0, 0.0, 1.0));
+    float spec = pow(max(dot(n, hv), 0.0), 48.0);
+    // uncut board vs machined surface, so depth of cut reads at a glance
     float vh = (top - h) / max(thick, 0.001);
-    vec3 board = vec3(0.83, 0.72, 0.52);
-    vec3 floorc = vec3(0.42, 0.55, 0.48);
-    vec3 c = mix(board, floorc, smoothstep(0.001, 0.02, vh));
-    o = vec4(c * (0.32 + 0.72 * d) + 0.08 * s, 1.0);
+    vec3 board = pow(vec3(0.80, 0.67, 0.47), vec3(2.2));
+    vec3 cutc  = pow(vec3(0.50, 0.64, 0.56), vec3(2.2));
+    vec3 c = mix(board, cutc, smoothstep(0.001, 0.02, vh));
+    vec3 light = vec3(1.0, 0.96, 0.9) * 0.85 * dk + vec3(0.55, 0.65, 0.8) * 0.25 * df
+               + mix(vec3(0.08, 0.07, 0.06), vec3(0.24, 0.27, 0.32), sky);
+    vec3 lin = c * light + vec3(0.10) * spec;
+    o = vec4(pow(lin, vec3(1.0 / 2.2)), 1.0);
   }`;
   const prog = link(gl, vs, fs);
   if (!prog) return null;
@@ -2091,19 +2101,26 @@ function initGL(key, V) {
     // a V-bit's diameter is its tip; carve the cone out to a sensible width
     return s.kind === "vee" ? { R: Math.max(s.R, 6), kind: "vee" } : s;
   }
+  // The rim is anti-aliased: a cell the cutter only partly covers is cut
+  // part-way, so a wall is a slope one cell wide instead of a staircase of
+  // 0.2 mm cells, whose alternating faces shimmered as hatching on every
+  // vertical side. One cell is far below anything the eye reads as the cut.
   function stamp(x, y, z, sh) {
-    const Rc = sh.R, rc = Math.ceil(Rc / res), R2 = Rc * Rc;
+    const Rc = sh.R, rc = Math.ceil(Rc / res) + 1, Ro = Rc + 0.5 * res;
     const ci = (x - ox) / res, cj = (y - oy) / res;
     const i0 = Math.max(0, Math.floor(ci - rc)), i1 = Math.min(gw - 1, Math.ceil(ci + rc));
     const j0 = Math.max(0, Math.floor(cj - rc)), j1 = Math.min(gh - 1, Math.ceil(cj + rc));
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
-        const dx = (i - ci) * res, dy = (j - cj) * res, r2 = dx * dx + dy * dy;
-        if (r2 > R2) continue;
-        const zz = sh.kind === "ball" ? z + Rc - Math.sqrt(R2 - r2)
-                 : sh.kind === "vee" ? z + Math.sqrt(r2) : z;
+        const dx = (i - ci) * res, dy = (j - cj) * res, r = Math.sqrt(dx * dx + dy * dy);
+        if (r > Ro) continue;
+        const rr = Math.min(r, Rc);
+        const zz = sh.kind === "ball" ? z + Rc - Math.sqrt(Rc * Rc - rr * rr)
+                 : sh.kind === "vee" ? z + rr : z;
+        const cov = Math.min(1, (Ro - r) / res);          // 1 inside, 0 at half a cell out
         const k = j * gw + i;
-        if (H[k] > zz) H[k] = zz;
+        const hz = H[k] - (H[k] - zz) * cov;
+        if (H[k] > hz) H[k] = hz;
       }
     }
   }
@@ -2159,8 +2176,13 @@ function initGL(key, V) {
     return o;
   }
   function draw() {
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const w = Math.round(cv.clientWidth * dpr), h = Math.round(cv.clientHeight * dpr);
+    // Drawn at twice the screen's resolution (or more on a high-DPI screen)
+    // and scaled down: a 0.2 mm grid seen from across the sheet is finer than
+    // a pixel, and at 1:1 its steep walls shimmered into stripes. Capped so
+    // the backing store stays within what any GPU will allocate.
+    const ss = Math.max(2, Math.min(3, (window.devicePixelRatio || 1) * 1.5));
+    const lim = Math.min(1, 4096 / Math.max(1, cv.clientWidth * ss, cv.clientHeight * ss));
+    const w = Math.round(cv.clientWidth * ss * lim), h = Math.round(cv.clientHeight * ss * lim);
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
     gl.viewport(0, 0, cv.width, cv.height);
     gl.clearColor(0.067, 0.125, 0.106, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
