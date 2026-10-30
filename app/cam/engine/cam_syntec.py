@@ -1487,7 +1487,10 @@ def compute_jobs(name, loops, base=0.0, tool_map=None):
             continue
         ball = tm.get("surface") if tm.get("surface") in TOOLS else BALL_TOOL
         no_ball = ball not in TOOLS or TOOLS[ball]["dia"] <= 0
-        rough_t = TOOL_PREF[0] if TOOL_PREF and TOOL_PREF[0] in TOOLS else None
+        # A forced roughing seat (Tools & feeds, 3D job) if it is a loaded cutting
+        # tool; otherwise the widest loaded one.
+        rough_t = (tm.get("rough") if tm.get("rough") in TOOL_PREF
+                   else TOOL_PREF[0] if TOOL_PREF and TOOL_PREF[0] in TOOLS else None)
         if no_ball and not (lp.get("rough_without_ball") and rough_t is not None):
             print(f"    !! sculpted region on {name} but no ball-nose tool loaded — "
                   f"SKIPPED (set a seat's type to 'ballnose' in Tools & feeds)")

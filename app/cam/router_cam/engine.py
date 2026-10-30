@@ -86,7 +86,8 @@ class Result:
 # The features an operator may force a seat for, as the job sheet names them.
 # "chamfer" and "parting" ride in the same tool_map but have their own controls.
 TOOL_FEATURE_LABELS = {"profile": "outer profiles", "cutout": "internal cut-outs",
-                       "pocket": "pockets", "drill": "holes", "engrave": "engraving"}
+                       "pocket": "pockets", "drill": "holes", "engrave": "engraving",
+                       "rough": "3D roughing", "surface": "3D finishing (ball nose)"}
 
 
 def _apply_config(material: Material, tools: ToolTable):

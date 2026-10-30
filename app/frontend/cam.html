@@ -246,6 +246,8 @@ g.part.bad .outline { stroke: var(--error); }
 #dropzone span.sub { font-size: 12.5px; }
 #dropzone.dragover, #dropzone:hover { border-color: var(--primary); background: var(--primary-soft); }
 #dropzone:focus-visible { outline: 2px solid var(--primary); }
+/* A 3D job hides the settings that only mean something for flat boards. */
+body.mode3d .flat-only { display: none !important; }
 #modepick { display: flex; flex-direction: column; gap: 8px; margin: 0 0 12px; }
 #modepick label.check { align-items: flex-start; }
 #modepick input { margin-top: 3px; }
@@ -388,6 +390,7 @@ g.part.bad .outline { stroke: var(--error); }
           precaution against an inaccurate sheet or a bowed edge.
         </p>
         <div class="hr"></div>
+        <div class="flat-only">
         <h3 class="sub">Engrave part numbers</h3>
         <label class="check"><input type="checkbox" id="engrave" checked> Engrave part numbers</label>
         <label class="check" style="font-size:12px;opacity:.85;margin-top:4px" title="Identical parts are normally grouped under one name (N off). Ticked, each keeps its own name from the STEP file, so each is engraved differently."><input type="checkbox" id="uniquenames"> Name identical parts separately (each keeps its STEP name)</label>
@@ -398,6 +401,7 @@ g.part.bad .outline { stroke: var(--error); }
         </div>
         <p class="note" style="margin-top:8px">Needs a V-bit loaded in the tool table, or it falls back to a cutter and comes out chunky.</p>
         <div class="hr"></div>
+        </div>
         <h3 class="sub">Parting cut</h3>
         <label class="check"><input type="checkbox" id="autopart"> Part off the machined strip</label>
         <p class="note" style="margin-top:8px">
@@ -421,6 +425,7 @@ g.part.bad .outline { stroke: var(--error); }
 
       <!-- Profile -->
       <div class="pane" data-tab="profile">
+        <div class="flat-only">
         <h3 class="sub">What gets machined</h3>
         <label class="check"><input type="checkbox" id="machine3d" checked> 2.5D features</label>
         <p class="note" style="margin:6px 0 14px">
@@ -438,16 +443,17 @@ g.part.bad .outline { stroke: var(--error); }
         </p>
         <div id="p25warn" style="margin-top:10px"></div>
         <div class="hr"></div>
+        </div>
         <h3 class="sub">Cutting</h3>
         <div class="row">
           <label class="field">Tabs
             <select id="tabsmode">
               <option value="auto">Auto</option><option value="on">On</option><option value="off">Off</option>
             </select></label>
-          <label class="check" style="margin-bottom:8px"><input type="checkbox" id="dogbone" checked> Dogbones</label>
+          <label class="check flat-only" style="margin-bottom:8px"><input type="checkbox" id="dogbone" checked> Dogbones</label>
           <label class="check" style="margin-bottom:8px"><input type="checkbox" id="framenest" checked> Frame the nest first</label>
         </div>
-        <p class="note" style="margin-top:8px">
+        <p class="note flat-only" style="margin-top:8px">
           Dogbones relieve genuine sharp internal corners so mating parts seat.
           Modelled radii are left as drawn.
         </p>
@@ -487,6 +493,7 @@ g.part.bad .outline { stroke: var(--error); }
         </div>
         <p class="note" id="thicknote" style="margin-top:8px"></p>
         <div id="thickwarn" style="margin-top:10px"></div>
+        <div class="flat-only">
         <div class="hr"></div>
 
         <h3 class="sub">Edge break (chamfer)</h3>
@@ -508,6 +515,7 @@ g.part.bad .outline { stroke: var(--error); }
         <div id="ebnote" style="margin-top:10px"></div>
         <button class="btn ghost" id="ebpreview" type="button" style="margin-top:12px">Preview</button>
         <p class="note" id="ebpvnote" style="margin-top:8px"></p>
+        </div>
       </div>
 
       <!-- Tools & feeds -->
@@ -807,6 +815,8 @@ function renderWood(w) {
 function renderModeBanner() {
   const w = WOOD || {};
   const box = $("modebanner");
+  document.body.classList.toggle("mode3d", w.mode === "3d");
+  renderToolAssign();
   if (w.mode === "3d") {
     const ball = SEATS.some(s => s.loaded && s.kind === "ballnose");
     box.innerHTML = `<div class="banner ${ball ? "ok" : ""}"><b>3D job.</b> Each part is
@@ -1029,8 +1039,12 @@ function renderSeats() {
 /* ------------------------------------------------------- tool assignment */
 // Per-feature forced seats. Empty = Auto for everything, which is the default and
 // the right answer nearly always; each entry here was confirmed in a dialog.
-const TOOL_FEATURES = [["profile", "Outer profiles"], ["cutout", "Internal cut-outs"],
+const FLAT_FEATURES = [["profile", "Outer profiles"], ["cutout", "Internal cut-outs"],
                        ["pocket", "Pockets"], ["drill", "Holes"], ["engrave", "Engraving"]];
+// A 3D job is roughed, finished with the ball nose and profiled out.
+const FEATURES_3D = [["rough", "Roughing (flat cutter)"], ["surface", "Finishing (ball nose)"],
+                     ["profile", "Outer profile"]];
+let TOOL_FEATURES = FLAT_FEATURES;
 const NON_CUTTING = new Set(["vee", "chamfer", "ballnose"]);
 let TOOL_OVERRIDES = {};
 
@@ -1039,15 +1053,18 @@ function seatLabel(s) {
 }
 function eligibleSeats(feat) {
   // A V-bit or ball nose can engrave; it must never be forced through a board.
+  if (feat === "surface") return SEATS.filter(s => s.loaded && s.kind === "ballnose" && s.diameter_mm > 0);
   return SEATS.filter(s => s.loaded && (feat === "engrave" ||
                        (s.diameter_mm > 0 && !NON_CUTTING.has(s.kind))));
 }
 function renderToolAssign() {
   const box = $("toolassign");
   if (!box) return;
+  TOOL_FEATURES = (WOOD && WOOD.mode === "3d") ? FEATURES_3D : FLAT_FEATURES;
   // an override whose seat is no longer loaded or eligible is dropped, out loud
   const dropped = [];
   for (const [feat, seat] of Object.entries(TOOL_OVERRIDES)) {
+    if (!TOOL_FEATURES.some(f => f[0] === feat)) continue;     // the other job type's
     if (!eligibleSeats(feat).some(s => s.seat_no === seat)) {
       dropped.push(`${TOOL_FEATURES.find(f => f[0] === feat)[1]} → T${String(seat).padStart(2, "0")}`);
       delete TOOL_OVERRIDES[feat];
@@ -1079,7 +1096,8 @@ function renderToolAssign() {
     TOOL_OVERRIDES[feat] = +val;
     renderToolAssign();
   }));
-  const forced = Object.entries(TOOL_OVERRIDES).map(([feat, seat]) =>
+  const forced = Object.entries(TOOL_OVERRIDES).filter(([feat]) =>
+    TOOL_FEATURES.some(f => f[0] === feat)).map(([feat, seat]) =>
     `${TOOL_FEATURES.find(f => f[0] === feat)[1]} → ${esc(seatLabel(SEATS.find(s => s.seat_no === seat)))}`);
   $("toolassignnote").innerHTML =
     (forced.length ? `<div class="banner" style="margin-top:10px"><b>Tool override in force:</b> ${forced.join("; ")}.
@@ -1226,8 +1244,14 @@ function payload() {
   // behind from an earlier job quietly re-apply itself.
   m.thickness_override = $("thickover").checked
     ? (parseFloat($("thickval").value) || 0) : 0;
-  const toolMap = Object.assign({}, TOOL_OVERRIDES);   // each confirmed in its dialog
-  if ($("edgebreak").checked && $("chamfertool").value)
+  const toolMap = {};                                   // each confirmed in its dialog
+  for (const [feat, seat] of Object.entries(TOOL_OVERRIDES))
+    if (TOOL_FEATURES.some(f => f[0] === feat)) toolMap[feat] = seat;
+  if (WOOD && WOOD.mode === "3d") {
+    // hidden for a 3D job, so never applied behind the operator's back
+    m.edge_break = false; m.dogbone = false;
+  }
+  if (m.edge_break && $("chamfertool").value)
     toolMap.chamfer = +$("chamfertool").value;
   return {
     prefix: JOB_TITLE,        // programs are named after the assembly

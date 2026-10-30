@@ -309,3 +309,28 @@ def test_a_seam_between_triangles_is_not_a_hole():
     assert len(clean.interiors) == 1
     assert Polygon(clean.interiors[0]).area == pytest.approx(100.0)
     assert W3._drop_specks(Polygon(outer, [hole])).equals(Polygon(outer, [hole]))
+
+
+def test_a_forced_roughing_seat_roughs_the_3d_part():
+    """Tools & feeds on a 3D job offers Roughing / Finishing / Outer profile.
+    Forcing the Ø4 (T07) for roughing must put the surfacing on T07."""
+    from backend.services import wood_cam_service as WCS
+    from router_cam.engine import generate_from_parts
+    from router_cam.models import DEFAULT_MATERIALS
+    p = _part(_frustum())
+    parts, diag = WCS.cam_parts_and_diag([p], names={p.name}, mode="3d")
+    res = generate_from_parts(parts, diag, "t3d-rough7", DEFAULT_MATERIALS[0], _tools(False),
+                              sheet_w=1220, sheet_h=2440, border_mm=20,
+                              tool_map={"rough": 7})
+    prog = res.programs[0]
+    assert _surface_z(prog["nc"], 7), "nothing was cut with T07"
+    assert any("3D roughing" in w for w in prog["warnings"])     # the override is stated
+
+
+def test_the_page_hides_flat_only_settings_on_a_3d_job():
+    page = (ROOT / "frontend" / "cam.html").read_text(encoding="utf-8")
+    assert "body.mode3d .flat-only" in page
+    for marker in ('id="engrave"', 'id="machine3d"', 'id="dogbone"', 'id="edgebreak"'):
+        i = page.index(marker)
+        assert page.rfind("flat-only", 0, i) > page.rfind('class="pane"', 0, i), marker
+    assert '["rough", "Roughing (flat cutter)"]' in page
