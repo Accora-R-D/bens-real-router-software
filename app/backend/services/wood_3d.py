@@ -213,10 +213,14 @@ def part_geometry_3d(shape, name: str = "") -> dict:
                                      int(math.ceil(REACH_MM / grid["res"])))
     mask &= near_low > 0
 
+    # The part itself, in the same frame as its loops, for the 3D job view:
+    # triangles (n, 3, 3), base on z = 0, as the nest will place them.
+    model = np.round(SE._to_frame(mesh["tris"].reshape(-1, 3).astype(float), frame)
+                     .reshape(-1, 3, 3), 3)
     loops.append({"role": "SURFACE", "pts": _ring(foot.exterior.coords),
                   "circle": None, "isOuter": False, "zmap": zmap, "grid": grid,
                   "mask": mask, "top": thickness, "rough_without_ball": True,
-                  "steep_cross": True})
+                  "steep_cross": True, "model": model})
 
     warnings = []
     if report["recommended_overhang_pct"] > OVERHANG_WARN_PCT:

@@ -167,6 +167,8 @@ def prepare_part(name, loops, meta=None):
             lp["islands"] = [[(x-mnx, y-mny) for x, y in isl] for isl in lp["islands"]]
         if lp.get("grid"):        # a SURFACE heightfield moves with its region
             lp["grid"] = dict(lp["grid"], ox=lp["grid"]["ox"]-mnx, oy=lp["grid"]["oy"]-mny)
+        if lp.get("model") is not None:    # ...and so does the 3D part it was read from
+            lp["model"] = [[(x-mnx, y-mny, z) for x, y, z in tri] for tri in lp["model"]]
     # pocket outlines (for the plan view) — same frame as the jobs (origin-translated)
     # `through` separates a recess with a floor left in it (a counterbore, a blind
     # pocket — needs the part the right way up) from one that breaks out the far
@@ -233,6 +235,8 @@ def prepare_part(name, loops, meta=None):
             "maxdim": maxdim, "tab": maxdim < SMALL_PART_MAXDIM,
             "pocket_outlines": pocket_outlines,
             "surface_regions": surface_regions,
+            "model": next((lp["model"] for lp in loops
+                           if lp["role"] == "SURFACE" and lp.get("model") is not None), None),
             "inner_outlines": inner_outlines, "hole_circles": hole_circles,
             "engrave_strokes": engrave_strokes, "engrave_text": meta.get("label", ""),
             "feature_limits": limits,
@@ -463,6 +467,34 @@ def _wants_tab(part, tabs_mode):
     return part["maxdim"] < SMALL_PART_MAXDIM      # "auto"
 
 
+def _scene_part(part, k, dx, dy, thickness):
+    """One 3D part as the 3D job view draws it, placed on the sheet: the model
+    (flat [x,y,z, ...] of its triangles) and its toolpaths by operation —
+    surfacing as (x,y,z) polylines with their seat (the page tells roughing
+    from the ball-nose finish by the seat's type), the profile as the 2D line
+    the cutter runs round at full depth."""
+    from cam_syntec import straight_runs
+    def place(pts):
+        return [(x + dx, y + dy) for x, y in rot(pts, k)]
+    tris = []
+    for tri in part["model"]:
+        for (x, y), q in zip(place([(q[0], q[1]) for q in tri]), tri):
+            tris += [round(x, 2), round(y, 2), round(float(q[2]), 2)]
+    ops = []
+    final = depth_passes(thickness)[-1]
+    for role, path, _pd, tool in part["jobs"]:
+        if role == "SURFACE":
+            for loop in path:
+                xy = place([(q[0], q[1]) for q in loop])
+                pts = straight_runs([(x, y, q[2]) for (x, y), q in zip(xy, loop)])
+                ops.append({"op": "surface", "tool": tool,
+                            "pts": [round(c, 2) for p in pts for c in p]})
+        elif role in ("OUTSIDE", "OUTSIDE_FIN"):
+            ops.append({"op": "profile", "tool": tool, "z": round(final, 2),
+                        "pts": [round(c, 2) for p in place(path) for c in p]})
+    return {"name": part["name"], "tris": tris, "ops": ops}
+
+
 def nest_and_emit(parts, thickness, prefix, sheet_w=SHEET_W, sheet_h=SHEET_H,
                   blocked=None, tabs_mode=None, backplot=True,
                   auto_part=False, part_cuts=None, grain_locked=False, swap_xy=False,
@@ -628,6 +660,7 @@ def nest_and_emit(parts, thickness, prefix, sheet_w=SHEET_W, sheet_h=SHEET_H,
                 ax.add_patch(plt.Rectangle((b["x"], b["y"]), b["w"], b["h"],
                                            facecolor="#bbb", edgecolor="#777", hatch="//", alpha=0.5))
         all_jobs2 = []          # flip-jig second pass: far-face recesses only
+        scene = []              # 3D jobs: each part's model and toolpaths, placed
         for _pi, (part, k, dx, dy) in enumerate(placements):
             used += part.get("poly_area", part["area"])   # true footprint, not bbox
             want_tab = _wants_tab(part, tabs_mode)
@@ -717,6 +750,8 @@ def nest_and_emit(parts, thickness, prefix, sheet_w=SHEET_W, sheet_h=SHEET_H,
                 lp["pockets"].append({"outline": _decim(tpp), "depth": po.get("depth"),
                                       "islands": isls, "through": bool(po.get("through"))})
             layout["parts"].append(lp)
+            if part.get("model") is not None:
+                scene.append(_scene_part(part, k, dx, dy, thickness))
             roles = [j[0] for j in part["jobs"]]
             manifest["parts"].append({
                 "name": part["name"], "rotation_deg": k*90,
@@ -769,6 +804,13 @@ def nest_and_emit(parts, thickness, prefix, sheet_w=SHEET_W, sheet_h=SHEET_H,
         fn = OUT / (f"{prefix}_{si+1}.NC" if len(sheets) > 1 else f"{prefix}.NC")
         fn.write_text(prog.dumps())
         fn.with_suffix(".json").write_text(json.dumps(manifest, indent=2))
+        # The 3D job view reads this beside the program; a flat job writes none,
+        # and a re-generate must not leave a previous run's scene behind.
+        scn = fn.with_suffix(".scene.json")
+        if scene:
+            scn.write_text(json.dumps(scene, separators=(",", ":")))
+        else:
+            scn.unlink(missing_ok=True)
         out_files.append(fn)
         # Flip-jig SECOND PASS: its own program, run after the operator drops the
         # flipped part(s) into the mould cavity/cavities. Only the far face's

@@ -199,7 +199,18 @@ def _viewer_payload(nc_path: Path, top: float, tools: "ToolTable | None" = None)
                      "pz": [p[2] for p in pts], "cut": [p[3] for p in pts],
                      "tool": [p[4] for p in pts]},
             "tools": shapes,
+            # 3D jobs: each part's model and toolpaths, placed (nest._scene_part)
+            "scene": _scene(nc_path),
             "R": cs.R}
+
+
+def _scene(nc_path: Path):
+    import json
+    f = nc_path.with_suffix(".scene.json")
+    try:
+        return json.loads(f.read_text()) if f.exists() else []
+    except (OSError, ValueError):
+        return []
 
 
 def _frame_lines(nc_text, clear, sheet_w, sheet_h, dia_by_seat):

@@ -334,3 +334,17 @@ def test_the_page_hides_flat_only_settings_on_a_3d_job():
         i = page.index(marker)
         assert page.rfind("flat-only", 0, i) > page.rfind('class="pane"', 0, i), marker
     assert '["rough", "Roughing (flat cutter)"]' in page
+
+
+def test_a_3d_program_carries_its_placed_scene():
+    """The 3D job view draws each part's model and toolpaths where the nest put
+    them: the model must sit on the layout's outline, and a flat job has none."""
+    res = _generate(_frustum(), ball=True)
+    prog = res.programs[0]
+    (part,) = prog["viewer"]["scene"]
+    xs = part["tris"][0::3]
+    outline = prog["layout"][0]["parts"][0]["outline"]
+    assert min(xs) == pytest.approx(min(q[0] for q in outline), abs=0.05)
+    assert max(xs) == pytest.approx(max(q[0] for q in outline), abs=0.05)
+    assert {o["op"] for o in part["ops"]} == {"surface", "profile"}
+    assert {o["tool"] for o in part["ops"] if o["op"] == "surface"} == {1, 4}
