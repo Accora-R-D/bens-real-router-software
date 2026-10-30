@@ -956,6 +956,7 @@ class Prog:
         for p in paths:
             if len(p) < 2:
                 continue
+            p = straight_runs(p)
             x0, y0, z0 = p[0]
             self.add(f"G00Z{top + 1.0:.3f}")     # hop just above the stock
             self.add(f"G00X{x0:.3f}Y{y0:.3f}")
@@ -969,6 +970,48 @@ class Prog:
 
     def dumps(self):
         return "\n".join(self.lines) + "\n"
+
+
+STRAIGHT_TOL = 0.001    # mm a dropped point may sit off the line that replaces it
+
+
+def straight_runs(path, tol=STRAIGHT_TOL):
+    """The same polyline with the points that only continue a straight line
+    taken out. Surface passes come off the height map one point per grid cell
+    (0.4 mm), so a flat run 120 mm long was 300 lines of G-code: at cutting
+    feed the controller needs ~290 blocks a second for that, cannot keep up,
+    and slows down to stutter through them. Every dropped point lies within
+    `tol` of the line that replaces it, so the cutter follows the same path."""
+    if len(path) < 3:
+        return list(path)
+    out = [tuple(path[0])]
+    pending = []                      # points since out[-1]; the last is the candidate end
+    for q in path[1:]:
+        q = tuple(q)
+        if q == (pending[-1] if pending else out[-1]):
+            continue                  # a repeated point adds nothing
+        if not pending:
+            pending.append(q)
+            continue
+        a = out[-1]
+        d = [q[i] - a[i] for i in range(3)]
+        L2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+        ok = L2 > 0
+        for p in pending if ok else ():
+            v = [p[i] - a[i] for i in range(3)]
+            t = (v[0] * d[0] + v[1] * d[1] + v[2] * d[2]) / L2
+            w = [v[i] - t * d[i] for i in range(3)]
+            if t <= 0.0 or t >= 1.0 or w[0] * w[0] + w[1] * w[1] + w[2] * w[2] > tol * tol:
+                ok = False
+                break
+        if ok:
+            pending.append(q)
+        else:
+            out.append(pending[-1])   # the line turns here: keep the corner
+            pending = [q]
+    if pending:
+        out.append(pending[-1])
+    return out
 
 
 # ---- corner reliefs -------------------------------------------------------------

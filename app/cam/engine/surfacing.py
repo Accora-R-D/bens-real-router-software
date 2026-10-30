@@ -236,10 +236,37 @@ def raster_rough(zmap, grid, cutter: Cutter, *, stock_top, stepdown=3.0,
         z = max(floor, z - float(stepdown))
         levels.append(z)
     lane_extent = (Z.shape[0] - 1) * res
-    paths, points = [], 0
+    paths, points, linked = [], 0, 0
     prev = stock_top
     tan_ramp = math.tan(math.radians(max(1.0, min(15.0, ramp_angle_deg))))
+    link_max = 2.0 * cutter.dia
+
+    def link_ok(level, p, q):
+        """Can the cutter go straight from cell p to cell q at `level` without
+        gouging? The cell nearest every point of the line must let it sit at
+        that height — the rule every lane is cut by, and the field already
+        holds the cutter clear of the part by its radius (more, on diagonals:
+        its kernel is the square round the cutter)."""
+        n = max(2, int(math.ceil(math.dist(p, q) / (0.5 * res))) + 1)
+        for k in range(n):
+            t = k / (n - 1)
+            r = int(round(p[0] + (q[0] - p[0]) * t))
+            c = int(round(p[1] + (q[1] - p[1]) * t))
+            if not (0 <= r < Z.shape[0] and 0 <= c < Z.shape[1]):
+                return False
+            zc = Z[r, c]
+            if not np.isfinite(zc) or zc > level + 1e-9:
+                return False
+        return True
+
     for level in levels:
+        # Every run on this level first, then chained: from the lowest run left,
+        # step to the nearest run in a lane either side whenever the cutter can
+        # get there at this level, so each island is one continuous zigzag with
+        # one ramp. A raster that lifted and ramped for every run (the Mould:
+        # 217 paths, each zigzagging down 6.2 mm at 5 deg, often over a 5 mm
+        # run) spent more of its travel ramping than cutting.
+        runs = []
         li = 0
         while li * stepover <= lane_extent + 1e-9:
             lane = li * stepover
@@ -248,32 +275,58 @@ def raster_rough(zmap, grid, cutter: Cutter, *, stock_top, stepdown=3.0,
             if M is not None:
                 lane_ok &= M[row]             # rough only the masked region
             for s, e in _runs(lane_ok):
-                if e - s < 2:
-                    continue
-                cols = list(range(s, e))
-                if (li + len(paths)) % 2:
-                    cols.reverse()
-                a, b = cols[0], cols[-1]
-                run_len = max(res, abs(b - a) * res)
-                ramp_len = max(0.0, (prev - level) / tan_ramp)
-                traversals = max(1, int(math.ceil(ramp_len / run_len)))
-                path = []
-                for k in range(traversals + 1):
-                    c = a if k % 2 == 0 else b
-                    frac = min(1.0, (k * run_len) / max(ramp_len, 1e-9))
-                    path.append(point(c, lane, prev + (level - prev) * frac))
-                if path[-1][2] > level + 1e-9:
-                    c = b if path[-1][0:2] == point(a, lane, level)[0:2] else a
-                    path.append(point(c, lane, level))
-                start_at_a = path[-1][0:2] == point(a, lane, level)[0:2]
-                clear_cols = cols if start_at_a else list(reversed(cols))
-                path.extend(point(c, lane, level) for c in clear_cols[1:])
-                paths.append(path); points += len(path)
+                if e - s >= 2:
+                    runs.append((li, row, lane, s, e - 1))
             li += 1
+        left = list(range(len(runs)))
+        while left:
+            k = left.pop(0)
+            li, row, lane, s, e = runs[k]
+            cols = list(range(s, e + 1))
+            if len(paths) % 2:
+                cols.reverse()
+            a, b = cols[0], cols[-1]
+            run_len = max(res, abs(b - a) * res)
+            ramp_len = max(0.0, (prev - level) / tan_ramp)
+            traversals = max(1, int(math.ceil(ramp_len / run_len)))
+            path = []
+            for t in range(traversals + 1):
+                c = a if t % 2 == 0 else b
+                frac = min(1.0, (t * run_len) / max(ramp_len, 1e-9))
+                path.append(point(c, lane, prev + (level - prev) * frac))
+            if path[-1][2] > level + 1e-9:
+                c = b if path[-1][0:2] == point(a, lane, level)[0:2] else a
+                path.append(point(c, lane, level))
+            start_at_a = path[-1][0:2] == point(a, lane, level)[0:2]
+            clear_cols = cols if start_at_a else list(reversed(cols))
+            path.extend(point(c, lane, level) for c in clear_cols[1:])
+            end = (row, clear_cols[-1])
+            cur = li
+            while True:
+                best = None
+                for j in left:
+                    lj, rj, lanej, sj, ej = runs[j]
+                    if abs(lj - cur) != 1:
+                        continue
+                    near, far = (sj, ej) if abs(sj - end[1]) <= abs(ej - end[1]) else (ej, sj)
+                    d = math.dist((end[0] * res, end[1] * res), (rj * res, near * res))
+                    if d <= link_max and (best is None or d < best[0]):
+                        best = (d, j, near, far)
+                if best is None or not link_ok(level, end, (runs[best[1]][1], best[2])):
+                    break
+                _d, j, near, far = best
+                left.remove(j)
+                lj, rj, lanej, _s, _e = runs[j]
+                step = 1 if far >= near else -1
+                path.extend(point(c, lanej, level) for c in range(near, far + step, step))
+                linked += 1
+                end, cur = (rj, far), lj
+            paths.append(path); points += len(path)
         prev = level
     info = {"stepdown_mm": float(stepdown), "stepover_mm": round(stepover, 4),
             "stock_to_leave_mm": float(stock_to_leave), "levels": len(levels),
             "paths": len(paths), "points": points, "ramp_paths": len(paths),
+            "linked_runs": linked,
             "along": along, "stock_top_mm": stock_top,
             "cutter": {"kind": cutter.kind, "dia": cutter.dia, "corner": cutter.corner}}
     return paths, target, info
