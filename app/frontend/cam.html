@@ -172,6 +172,22 @@ td input[type=number] { width: 100%; padding: 6px 8px; }
 /* ── plan view ──────────────────────────────────────────────────────── */
 /* The bed is portrait and tall. Cap the drawing so the whole card — plan, meta and
    the colour key under it — stays on screen together; the key is no use scrolled off. */
+/* 3D jobs: a big 3D view beside a narrow sheet plan. Flat jobs never see it. */
+:root { --v3-rough: #e8a33c; --v3-finish: #5fb4ff; --v3-profile: #4ade80; }
+#view3dpane { display: none; }
+body.mode3d #viewsplit { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 1fr);
+                         gap: 14px; align-items: start; }
+body.mode3d #view3dpane { display: block; }
+.v3d-tools { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; }
+.v3d-tools .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px;
+                 background: var(--c); margin: 0 6px 0 2px; vertical-align: -1px; }
+#view3dwrap { position: relative; height: min(66vh, 820px); border-radius: 8px; overflow: hidden;
+              border: 1px solid var(--border);
+              background: radial-gradient(ellipse at 50% 35%, #22332d 0%, #131c19 75%); }
+#view3d { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+#view3d.grabbing { cursor: grabbing; }
+#v3msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+         margin: 0; pointer-events: none; }
 #planwrap { position: relative; background: var(--surface-2);
             border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
             height: min(66vh, 820px); }
@@ -284,11 +300,27 @@ body.mode3d .flat-only { display: none !important; }
   <!-- ── preview ─────────────────────────────────────────────────── -->
   <div class="preview">
     <div class="card">
-      <h2>Sheet layout
+      <h2><span id="previewtitle">Sheet layout</span>
         <span class="spacer"></span>
         <span class="note" id="sheetpick"></span>
       </h2>
       <div class="body">
+        <div id="viewsplit">
+        <!-- 3D jobs: the parts and their toolpaths in 3D, beside the sheet plan -->
+        <div id="view3dpane">
+          <div class="v3d-tools">
+            <label class="check"><input type="checkbox" id="v3model" checked> Part</label>
+            <label class="check"><input type="checkbox" id="v3rough" checked><span class="sw" style="--c:var(--v3-rough)"></span>Roughing</label>
+            <label class="check"><input type="checkbox" id="v3finish" checked><span class="sw" style="--c:var(--v3-finish)"></span>Finishing</label>
+            <label class="check"><input type="checkbox" id="v3profile" checked><span class="sw" style="--c:var(--v3-profile)"></span>Profile</label>
+            <label class="check"><input type="checkbox" id="v3stock"> Stock</label>
+            <button class="btn ghost small" type="button" id="v3fit">Fit</button>
+            <span class="note" style="margin-left:auto">Drag to orbit · right-drag to pan · wheel to zoom</span>
+          </div>
+          <div id="view3dwrap"><canvas id="view3d"></canvas>
+            <p class="note" id="v3msg">Nest the parts to see them in 3D.</p></div>
+        </div>
+        <div id="planpane">
         <div class="plan-tools">
           <button class="btn ghost small" type="button" id="zoomout" title="Zoom out">&minus;</button>
           <span class="zoomlabel" id="zoomlabel">100%</span>
@@ -308,6 +340,8 @@ body.mode3d .flat-only { display: none !important; }
           <span class="l-path">toolpath</span>
         </div>
         <div id="planmeta" class="note" style="margin-top:10px"></div>
+        </div>
+        </div>
       </div>
     </div>
   </div>
@@ -816,6 +850,7 @@ function renderModeBanner() {
   const w = WOOD || {};
   const box = $("modebanner");
   document.body.classList.toggle("mode3d", w.mode === "3d");
+  $("previewtitle").textContent = w.mode === "3d" ? "3D view & sheet layout" : "Sheet layout";
   renderToolAssign();
   if (w.mode === "3d") {
     const ball = SEATS.some(s => s.loaded && s.kind === "ballnose");
@@ -852,7 +887,7 @@ async function setMode(mode) {
     if (!r.ok) throw new Error(data.detail || `Server error ${r.status}`);
     WOOD.mode = data.mode;
     WOOD.suggest_3d = data.suggest_3d;
-    RESULT = null; SIM = null;
+    RESULT = null; SIM = null; draw3DJob();
     renderWood(WOOD);
     $("planwrap").innerHTML = `<p class="note" style="padding:24px">Job type changed —
       press Nest to lay the parts out again.</p>`;
@@ -1290,6 +1325,7 @@ async function generate() {
     if (!r.ok) throw new Error(data.detail || `Server error ${r.status}`);
     RESULT = data;
     SIM = null;
+    VIEWCACHE.clear();                   // the old programs' viewer data is stale
     DIRTY = false;
     renderResult(data);
     return true;
@@ -1343,6 +1379,7 @@ function renderResult(d) {
   renderSheetPicker(progs);
   drawPlan(d);
   ensureSim();
+  draw3DJob();
 }
 
 function renderSheetPicker(progs) {
@@ -1355,7 +1392,7 @@ function renderSheetPicker(progs) {
   $("sheetpick").querySelectorAll("[data-show]").forEach(b =>
     b.addEventListener("click", () => {
       SHOWN = +b.dataset.show; SIM = null;
-      renderSheetPicker(progs); drawPlan(RESULT); ensureSim();
+      renderSheetPicker(progs); drawPlan(RESULT); ensureSim(); draw3DJob();
     }));
 }
 
@@ -1963,11 +2000,7 @@ async function ensureSim() {
      style="border-color:rgba(0,0,0,.2);border-top-color:var(--primary)"></span>
      Loading the ${esc(progLabel(prog))} program…</p>`;
   try {
-    const r = await fetch(`/cam/viewer/${JOB}?thickness=${encodeURIComponent(progKey(prog))}`,
-                          { credentials: "include" });
-    const data = await readJSON(r);
-    if (!r.ok) throw new Error(data.detail || `Server error ${r.status}`);
-    buildSim(progKey(prog), data);
+    buildSim(progKey(prog), await viewerData(prog));
   } catch (e) {
     $("simbody").innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
   }
@@ -2282,6 +2315,268 @@ function initGL(key, V) {
   SIM = { key, gl, draw };
   setFrac(1);          // land on the finished part; scrub back to watch it cut
   return gl;
+}
+
+
+/* ------------------------------------------------------------ viewer data */
+// One download of a program's viewer data (toolpath, cutters, and for a 3D job
+// its placed scene), shared by the 3D job view and the Simulation tab.
+const VIEWCACHE = new Map();
+async function viewerData(prog) {
+  const key = `${JOB}|${progKey(prog)}|${RESULT && RESULT.job_id}|${RESULT && RESULT.programs && RESULT.programs.indexOf(prog)}|${prog.nc_lines}`;
+  if (!VIEWCACHE.has(key)) {
+    VIEWCACHE.clear();                          // one job's data at a time
+    VIEWCACHE.set(key, (async () => {
+      const r = await fetch(`/cam/viewer/${JOB}?thickness=${encodeURIComponent(progKey(prog))}`,
+                            { credentials: "include" });
+      const data = await readJSON(r);
+      if (!r.ok) throw new Error(data.detail || `Server error ${r.status}`);
+      return data;
+    })());
+  }
+  try { return await VIEWCACHE.get(key); }
+  catch (e) { VIEWCACHE.delete(key); throw e; }
+}
+
+/* ------------------------------------------------------------ 3D job view */
+// The parts as modelled and every toolpath, in 3D, for a 3D job: roughing,
+// the ball-nose finish and the profile in their own colours, each switchable.
+let V3 = null;
+async function draw3DJob() {
+  const msg = (t) => { $("v3msg").textContent = t; $("v3msg").style.display = t ? "" : "none"; };
+  if (!(WOOD && WOOD.mode === "3d")) return;
+  const prog = RESULT && (RESULT.programs || [])[SHOWN];
+  if (!prog) { if (V3) V3.clear(); msg("Nest the parts to see them in 3D."); return; }
+  msg("Loading…");
+  let data;
+  try { data = await viewerData(prog); }
+  catch (e) { msg(e.message); return; }
+  if (!(data.scene || []).length) { if (V3) V3.clear(); msg("No 3D parts on this sheet."); return; }
+  if (!V3) V3 = make3DView($("view3d"));
+  if (!V3) { msg("This browser could not start WebGL2."); return; }
+  V3.load(data, (data.grid || {}).top || 0);
+  msg("");
+}
+
+function make3DView(cv) {
+  const gl = cv.getContext("webgl2", { antialias: true });
+  if (!gl) return null;
+  const meshProg = link(gl, `#version 300 es
+    in vec3 p; in vec3 n; uniform mat4 mvp; out vec3 vn;
+    void main(){ vn = n; gl_Position = mvp * vec4(p, 1.0); }`, `#version 300 es
+    precision highp float; in vec3 vn; uniform vec3 base; uniform float alpha; out vec4 o;
+    void main(){
+      vec3 nn = normalize(vn); if (!gl_FrontFacing) nn = -nn;
+      vec3 key = normalize(vec3(0.45, -0.55, 0.75)), fill = normalize(vec3(-0.6, 0.5, 0.45));
+      float dk = max(dot(nn, key), 0.0), df = max(dot(nn, fill), 0.0), sky = 0.5 + 0.5 * nn.z;
+      float spec = pow(max(dot(nn, normalize(key + vec3(0.0, 0.0, 1.0))), 0.0), 40.0);
+      vec3 c = pow(base, vec3(2.2));
+      vec3 light = vec3(1.0, 0.96, 0.9) * 0.85 * dk + vec3(0.55, 0.65, 0.8) * 0.25 * df
+                 + mix(vec3(0.08, 0.07, 0.06), vec3(0.24, 0.27, 0.32), sky);
+      o = vec4(pow(c * light + vec3(0.10) * spec, vec3(1.0 / 2.2)), alpha);
+    }`);
+  const lineProg = link(gl, `#version 300 es
+    in vec3 p; uniform mat4 mvp; void main(){ gl_Position = mvp * vec4(p, 1.0); }`,
+    `#version 300 es
+    precision highp float; uniform vec4 col; out vec4 o; void main(){ o = col; }`);
+  if (!meshProg || !lineProg) return null;
+
+  const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  const rgb = (hex) => { const h = hex.replace("#", ""); return [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16) / 255); };
+  let items = [], target = [0, 0, 0], span = 100, cam = { yaw: -0.9, pitch: 0.75, dist: 300 };
+
+  function buffer(kind, data, normals) {
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const prog = kind === "mesh" ? meshProg : lineProg;
+    const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    let loc = gl.getAttribLocation(prog, "p");
+    gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+    const bufs = [vb];
+    if (normals) {
+      const nb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, nb);
+      gl.bufferData(gl.ARRAY_BUFFER, normals, gl.STATIC_DRAW);
+      loc = gl.getAttribLocation(prog, "n");
+      gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+      bufs.push(nb);
+    }
+    return { vao, bufs, count: data.length / 3 };
+  }
+  function faceNormals(t) {
+    const n = new Float32Array(t.length);
+    for (let i = 0; i < t.length; i += 9) {
+      const ax = t[i + 3] - t[i], ay = t[i + 4] - t[i + 1], az = t[i + 5] - t[i + 2];
+      const bx = t[i + 6] - t[i], by = t[i + 7] - t[i + 1], bz = t[i + 8] - t[i + 2];
+      let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+      const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+      for (let k = 0; k < 9; k += 3) { n[i + k] = nx; n[i + k + 1] = ny; n[i + k + 2] = nz; }
+    }
+    return n;
+  }
+  function segs(polys, closed) {            // polylines -> GL_LINES pairs
+    let total = 0;
+    for (const p of polys) { const n = p.length / 3; total += closed ? n : Math.max(0, n - 1); }
+    const out = new Float32Array(total * 6);
+    let o = 0;
+    for (const p of polys) {
+      const n = p.length / 3, m = closed ? n : n - 1;
+      for (let i = 0; i < m; i++) {
+        const j = (i + 1) % n;
+        out[o++] = p[3 * i]; out[o++] = p[3 * i + 1]; out[o++] = p[3 * i + 2];
+        out[o++] = p[3 * j]; out[o++] = p[3 * j + 1]; out[o++] = p[3 * j + 2];
+      }
+    }
+    return out;
+  }
+  function box(x0, y0, z0, x1, y1, z1) {
+    const v = [[x0,y0,z0],[x1,y0,z0],[x1,y1,z0],[x0,y1,z0],[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]];
+    const f = [[0,2,1],[0,3,2],[4,5,6],[4,6,7],[0,1,5],[0,5,4],[1,2,6],[1,6,5],[2,3,7],[2,7,6],[3,0,4],[3,4,7]];
+    return new Float32Array(f.flatMap(t => t.flatMap(i => v[i])));
+  }
+
+  function clear() {
+    for (const it of items) { it.bufs.forEach(b => gl.deleteBuffer(b)); gl.deleteVertexArray(it.vao); }
+    items = [];
+    draw();
+  }
+
+  function load(data, top) {
+    clear();
+    const tools = data.tools || {};
+    const ball = (t) => (tools[String(t)] || {}).kind === "ball";
+    const rough = [], fin = [], prof = [];
+    let ntri = 0;
+    for (const part of data.scene) ntri += part.tris.length;
+    const T = new Float32Array(ntri);
+    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, o = 0;
+    for (const part of data.scene) {
+      T.set(part.tris, o); o += part.tris.length;
+      for (let i = 0; i < part.tris.length; i += 3) {
+        x0 = Math.min(x0, part.tris[i]); x1 = Math.max(x1, part.tris[i]);
+        y0 = Math.min(y0, part.tris[i + 1]); y1 = Math.max(y1, part.tris[i + 1]);
+      }
+      for (const op of part.ops) {
+        if (op.op === "profile") {
+          const q = [];
+          for (let i = 0; i < op.pts.length; i += 2) q.push(op.pts[i], op.pts[i + 1], op.z);
+          prof.push(q);
+        } else (ball(op.tool) ? fin : rough).push(op.pts);
+      }
+    }
+    const pad = 12, zt = Math.max(top, 1);
+    items.push({ name: "model", kind: "mesh", ...buffer("mesh", T, faceNormals(T)), base: [0.80, 0.67, 0.47] });
+    items.push({ name: "rough", kind: "line", ...buffer("line", segs(rough, false)), col: [...rgb(css("--v3-rough")), 0.55] });
+    items.push({ name: "finish", kind: "line", ...buffer("line", segs(fin, false)), col: [...rgb(css("--v3-finish")), 0.28] });
+    items.push({ name: "profile", kind: "line", ...buffer("line", segs(prof, true)), col: [...rgb(css("--v3-profile")), 1.0] });
+    // a 10 mm floor grid under the parts, for scale
+    const g = [], gx0 = Math.floor((x0 - pad) / 10) * 10, gx1 = Math.ceil((x1 + pad) / 10) * 10;
+    const gy0 = Math.floor((y0 - pad) / 10) * 10, gy1 = Math.ceil((y1 + pad) / 10) * 10;
+    for (let x = gx0; x <= gx1; x += 10) g.push(x, gy0, 0, x, gy1, 0);
+    for (let y = gy0; y <= gy1; y += 10) g.push(gx0, y, 0, gx1, y, 0);
+    items.push({ name: "grid", kind: "line", ...buffer("line", new Float32Array(g)), col: [1, 1, 1, 0.07] });
+    const sb = box(x0 - pad, y0 - pad, 0, x1 + pad, y1 + pad, zt);
+    items.push({ name: "stock", kind: "mesh", ...buffer("mesh", sb, faceNormals(sb)), base: [0.86, 0.74, 0.54], alpha: 0.18 });
+    target = [(x0 + x1) / 2, (y0 + y1) / 2, zt / 2];
+    span = Math.max(x1 - x0, y1 - y0, zt) + 2 * pad;
+    fit();
+  }
+
+  function fit() { cam = { yaw: -0.9, pitch: 0.75, dist: span * 1.6 }; draw(); }
+
+  function mvp() {
+    const w = cv.width, h = cv.height, f = 1 / Math.tan(0.4);
+    const near = Math.max(0.5, cam.dist / 200), far = cam.dist * 20;
+    const P = [f * h / w, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) / (near - far), -1,
+               0, 0, 2 * far * near / (near - far), 0];
+    const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw), cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+    const e = [target[0] + cam.dist * cp * cy, target[1] + cam.dist * cp * sy, target[2] + cam.dist * sp];
+    const Z = [cp * cy, cp * sy, sp];
+    let X = [-Z[1], Z[0], 0]; const xl = Math.hypot(X[0], X[1]) || 1; X = [X[0] / xl, X[1] / xl, 0];
+    const Y = [Z[1] * X[2] - Z[2] * X[1], Z[2] * X[0] - Z[0] * X[2], Z[0] * X[1] - Z[1] * X[0]];
+    const Vm = [X[0], Y[0], Z[0], 0, X[1], Y[1], Z[1], 0, X[2], Y[2], Z[2], 0,
+                -(X[0] * e[0] + X[1] * e[1] + X[2] * e[2]), -(Y[0] * e[0] + Y[1] * e[1] + Y[2] * e[2]),
+                -(Z[0] * e[0] + Z[1] * e[1] + Z[2] * e[2]), 1];
+    const m = new Float32Array(16);
+    for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+      let s = 0; for (let k = 0; k < 4; k++) s += P[k * 4 + j] * Vm[i * 4 + k]; m[i * 4 + j] = s;
+    }
+    return { m, X, Y };
+  }
+
+  const shown = { model: "v3model", rough: "v3rough", finish: "v3finish", profile: "v3profile", stock: "v3stock" };
+  function on(name) { return !shown[name] || $(shown[name]).checked; }
+
+  function draw() {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = Math.round(cv.clientWidth * dpr), h = Math.round(cv.clientHeight * dpr);
+    if (!w || !h) return;
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    if (!items.length) return;
+    const M = mvp().m;
+    gl.enable(gl.DEPTH_TEST); gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // the model is pushed back a hair so a toolpath lying on its surface shows
+    gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1.5, 2.0);
+    const solid = items.filter(it => it.kind === "mesh" && !it.alpha && on(it.name));
+    const lines = items.filter(it => it.kind === "line" && on(it.name));
+    const glass = items.filter(it => it.kind === "mesh" && it.alpha && on(it.name));
+    gl.useProgram(meshProg);
+    gl.uniformMatrix4fv(gl.getUniformLocation(meshProg, "mvp"), false, M);
+    for (const it of solid) {
+      gl.uniform3fv(gl.getUniformLocation(meshProg, "base"), it.base);
+      gl.uniform1f(gl.getUniformLocation(meshProg, "alpha"), 1.0);
+      gl.bindVertexArray(it.vao); gl.drawArrays(gl.TRIANGLES, 0, it.count);
+    }
+    gl.disable(gl.POLYGON_OFFSET_FILL);
+    gl.useProgram(lineProg);
+    gl.uniformMatrix4fv(gl.getUniformLocation(lineProg, "mvp"), false, M);
+    for (const it of lines) {
+      gl.uniform4fv(gl.getUniformLocation(lineProg, "col"), it.col);
+      gl.bindVertexArray(it.vao); gl.drawArrays(gl.LINES, 0, it.count);
+    }
+    gl.depthMask(false);                       // see-through stock last
+    gl.useProgram(meshProg);
+    for (const it of glass) {
+      gl.uniform3fv(gl.getUniformLocation(meshProg, "base"), it.base);
+      gl.uniform1f(gl.getUniformLocation(meshProg, "alpha"), it.alpha);
+      gl.bindVertexArray(it.vao); gl.drawArrays(gl.TRIANGLES, 0, it.count);
+    }
+    gl.depthMask(true);
+  }
+
+  // orbit (left drag), pan (right drag or shift-drag), zoom (wheel)
+  let drag = null;
+  cv.addEventListener("contextmenu", e => e.preventDefault());
+  cv.addEventListener("pointerdown", e => {
+    drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey };
+    cv.setPointerCapture(e.pointerId); cv.classList.add("grabbing");
+  });
+  cv.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (drag.pan) {
+      const { X, Y } = mvp(), k = cam.dist / Math.max(1, cv.clientHeight) * 0.85;
+      for (let i = 0; i < 3; i++) target[i] += (-dx * X[i] + dy * Y[i]) * k;
+    } else {
+      cam.yaw -= dx * 0.008;
+      cam.pitch = Math.min(1.55, Math.max(-0.2, cam.pitch + dy * 0.006));
+    }
+    draw();
+  });
+  const end = () => { drag = null; cv.classList.remove("grabbing"); };
+  cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
+  cv.addEventListener("wheel", e => {
+    e.preventDefault();
+    cam.dist = Math.max(span * 0.05, Math.min(cam.dist * (e.deltaY < 0 ? 0.88 : 1.12), span * 20));
+    draw();
+  }, { passive: false });
+  Object.values(shown).forEach(id => $(id).addEventListener("change", draw));
+  $("v3fit").addEventListener("click", fit);
+  new ResizeObserver(draw).observe(cv);
+  return { load, clear, draw };
 }
 
 function link(gl, vsrc, fsrc) {

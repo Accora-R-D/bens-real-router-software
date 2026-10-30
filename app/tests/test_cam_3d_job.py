@@ -348,3 +348,12 @@ def test_a_3d_program_carries_its_placed_scene():
     assert max(xs) == pytest.approx(max(q[0] for q in outline), abs=0.05)
     assert {o["op"] for o in part["ops"]} == {"surface", "profile"}
     assert {o["tool"] for o in part["ops"] if o["op"] == "surface"} == {1, 4}
+
+
+def test_the_page_has_a_3d_view_beside_the_plan_for_3d_jobs():
+    page = (ROOT / "frontend" / "cam.html").read_text(encoding="utf-8")
+    assert 'id="view3d"' in page and 'id="planpane"' in page
+    assert "body.mode3d #viewsplit" in page and "minmax(0, 3fr) minmax(0, 1fr)" in page
+    for box in ("v3model", "v3rough", "v3finish", "v3profile", "v3stock"):
+        assert f'id="{box}"' in page
+    assert "draw3DJob();" in page and "async function viewerData(prog)" in page
