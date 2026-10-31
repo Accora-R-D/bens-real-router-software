@@ -480,9 +480,34 @@ def _slice(shape, origin, u, v, normal, drop):
     return prep(unary_union(polys))
 
 
+# A probe this close to its ring's edge is not asking about the ring's interior.
+# The ring and the slice it is tested against are two separate chord samplings
+# (CHORD_TOL_MM each) of the same wall, so they can disagree by up to twice that
+# about which side of the wall a point is on. On a chainstay plate a grid point
+# 0.023 mm inside a through window read as material, the window was taken for an
+# island and dropped from the cut with no warning. Probes must clear the wall by
+# well over that disagreement.
+PROBE_EDGE_MM = 0.25
+
+
+def _dist_to_ring(ring, pt) -> float:
+    x, y = pt
+    best = math.inf
+    n = len(ring)
+    for i in range(n):
+        x0, y0 = ring[i]
+        x1, y1 = ring[(i + 1) % n]
+        dx, dy = x1 - x0, y1 - y0
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((x - x0) * dx + (y - y0) * dy) / L2))
+        best = min(best, math.hypot(x - x0 - t * dx, y - y0 - t * dy))
+    return best
+
+
 def _interior_probes(ring, grid=5):
     """Points spread over a ring's interior to probe the solid at: the centroid
-    and a coarse grid over the ring's box, keeping only those inside the ring."""
+    and a coarse grid over the ring's box, keeping only those inside the ring
+    and at least PROBE_EDGE_MM clear of its edge."""
     xs = [p[0] for p in ring]; ys = [p[1] for p in ring]
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
     pts = [(sum(xs) / len(xs), sum(ys) / len(ys))]
@@ -490,7 +515,8 @@ def _interior_probes(ring, grid=5):
         for j in range(grid):
             pts.append((x0 + (x1 - x0) * (i + 0.5) / grid,
                         y0 + (y1 - y0) * (j + 0.5) / grid))
-    return [c for c in pts if _point_in_ring(ring, c)]
+    return [c for c in pts
+            if _point_in_ring(ring, c) and _dist_to_ring(ring, c) >= PROBE_EDGE_MM]
 
 
 def _project(p, origin, u, v):
