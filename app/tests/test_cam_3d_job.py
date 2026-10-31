@@ -357,3 +357,126 @@ def test_the_page_has_a_3d_view_beside_the_plan_for_3d_jobs():
     for box in ("v3model", "v3rough", "v3finish", "v3profile", "v3stock"):
         assert f'id="{box}"' in page
     assert "draw3DJob();" in page and "async function viewerData(prog)" in page
+
+
+# ------------------------------------------------------ plates in a 3D job
+
+PLATE_T = 15.0
+
+
+def _windowed_plate():
+    """A 220 x 36 x 15 stay with a window drawn as a closed spline (as a sketch
+    spline extrudes: a B-spline wall, square to the board) and a O8 hole."""
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+    from OCP.BRepBuilderAPI import (BRepBuilderAPI_MakeEdge, BRepBuilderAPI_MakeFace,
+                                    BRepBuilderAPI_MakeWire)
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder, BRepPrimAPI_MakePrism
+    from OCP.GeomAPI import GeomAPI_Interpolate
+    from OCP.TColgp import TColgp_HArray1OfPnt
+    from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt, gp_Vec
+    plate = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 220, 36, PLATE_T).Shape()
+    ring = [(60, 10), (100, 8), (140, 12), (150, 20), (130, 27), (90, 28), (65, 22)]
+    arr = TColgp_HArray1OfPnt(1, len(ring))
+    for i, (x, y) in enumerate(ring, 1):
+        arr.SetValue(i, gp_Pnt(x, y, -1.0))
+    it = GeomAPI_Interpolate(arr, True, 1e-6)
+    it.Perform()
+    wire = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(it.Curve()).Edge()).Wire()
+    window = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire).Face(),
+                                   gp_Vec(0, 0, PLATE_T + 2)).Shape()
+    hole = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(20, 18, -1), gp_Dir(0, 0, 1)), 4.0, PLATE_T + 2).Shape()
+    for tool in (window, hole):
+        plate = BRepAlgoAPI_Cut(plate, tool).Shape()
+    return plate
+
+
+def _standing(shape):
+    """The same part as it arrives modelled on edge: board face vertical."""
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    from OCP.gp import gp_Ax1, gp_Dir, gp_Pnt, gp_Trsf
+    t = gp_Trsf()
+    t.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)), math.pi / 2)
+    return BRepBuilderAPI_Transform(shape, t, True).Shape()
+
+
+def test_a_spline_window_does_not_make_a_plate_look_3d():
+    """A sketch-spline cut-out is a B-spline wall, not a cylinder: 15 mm of it
+    stood square to every windowed stay and they were all flagged as shaped."""
+    from backend.services.wood_3d import looks_3d
+    assert not looks_3d(_windowed_plate())
+    assert not looks_3d(_standing(_windowed_plate()))
+
+
+def test_a_3d_job_cuts_a_plate_flat_as_a_board_and_draws_it():
+    """Stays dropped into a 3D job were stood on edge (36 mm stock for a 15 mm
+    plate) and roughed as a heightfield. A plate is now read like a flat job's
+    board — laid on its face, profile, cut-outs and holes — and the 3D view
+    still draws it, sitting on its nested outline."""
+    from backend.services import wood_cam_service as WCS
+    p = _part(_standing(_windowed_plate()), "Stay")
+    p.thickness_mm = 36.0                           # what the bbox said on edge
+    (name, loops, meta), = WCS.cam_parts_and_diag([p], names={p.name}, mode="3d")[0]
+    _parts, (row,) = WCS.cam_parts_and_diag([p], names={p.name}, mode="3d")
+    assert row["thickness_mm"] == pytest.approx(PLATE_T, abs=0.01)
+    assert "flat plate" in row["reason"]
+    roles = sorted(lp["role"] for lp in loops)
+    assert roles == ["DRILL", "INSIDE", "OUTSIDE"]
+    assert meta.get("no_engrave") is True
+
+    from router_cam.engine import generate_from_parts
+    from router_cam.models import DEFAULT_MATERIALS
+    parts, diag = WCS.cam_parts_and_diag([p], names={p.name}, mode="3d")
+    res = generate_from_parts(parts, diag, "t3d-plate", DEFAULT_MATERIALS[0], _tools(True),
+                              sheet_w=1220, sheet_h=2440, border_mm=20)
+    (prog,) = res.programs
+    assert prog["thickness"] == pytest.approx(PLATE_T, abs=0.01)
+    assert "G18" not in prog["nc"] and not _surface_z(prog["nc"], 1), "a plate is not surfaced"
+    (part,) = prog["viewer"]["scene"]
+    xs, ys, zs = part["tris"][0::3], part["tris"][1::3], part["tris"][2::3]
+    outline = prog["layout"][0]["parts"][0]["outline"]
+    assert min(xs) == pytest.approx(min(q[0] for q in outline), abs=0.05)
+    assert max(ys) == pytest.approx(max(q[1] for q in outline), abs=0.05)
+    assert min(zs) == pytest.approx(0, abs=0.01) and max(zs) == pytest.approx(PLATE_T, abs=0.01)
+    ops = [o["op"] for o in part["ops"]]
+    assert ops.count("profile") == 2, "outline and window drawn round at full depth"
+    assert {"pocket", "plunge"} & set(ops), "the O8 hole drawn as it is cleared"
+
+
+def _trussed_plate(n=6, W=36.0, L=220.0):
+    """A stay with a row of n spline windows, alternately pointing up and down:
+    enough window wall that a side view reaches more of it than the top does."""
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+    from OCP.BRepBuilderAPI import (BRepBuilderAPI_MakeEdge, BRepBuilderAPI_MakeFace,
+                                    BRepBuilderAPI_MakeWire)
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakePrism
+    from OCP.GeomAPI import GeomAPI_Interpolate
+    from OCP.TColgp import TColgp_HArray1OfPnt
+    from OCP.gp import gp_Pnt, gp_Vec
+    plate = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), L, W, PLATE_T).Shape()
+    pitch = (L - 30) / n
+    for k in range(n):
+        x0, up = 15 + k * pitch, k % 2 == 0
+        y0, y1 = (5, W - 5) if up else (W - 5, 5)
+        tri = [(x0 + 2, y0), (x0 + pitch - 2, y0), (x0 + pitch / 2, y1)]
+        mids = [((a[0] + b[0]) / 2 + (0.6 if up else -0.6), (a[1] + b[1]) / 2)
+                for a, b in zip(tri, tri[1:] + tri[:1])]
+        ring = [q for pair in zip(tri, mids) for q in pair]
+        arr = TColgp_HArray1OfPnt(1, len(ring))
+        for i, (x, y) in enumerate(ring, 1):
+            arr.SetValue(i, gp_Pnt(x, y, -1.0))
+        it = GeomAPI_Interpolate(arr, True, 1e-6)
+        it.Perform()
+        face = BRepBuilderAPI_MakeFace(
+            BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(it.Curve()).Edge()).Wire()).Face()
+        plate = BRepAlgoAPI_Cut(plate, BRepPrimAPI_MakePrism(face, gp_Vec(0, 0, PLATE_T + 2)).Shape()).Shape()
+    return plate
+
+
+def test_a_3d_read_lays_a_windowed_plate_flat_not_on_edge():
+    """Most surface reached from above stood this stay on edge — a side view
+    sees half its window walls — and roughed it from 36 mm stock, undercutting
+    the other half. The least undercut decides, then the lowest stock."""
+    from backend.services.wood_3d import part_geometry_3d
+    g = part_geometry_3d(_standing(_trussed_plate()))
+    assert g["thickness"] == pytest.approx(PLATE_T, abs=0.05)
+    assert not g["warnings"], "lying flat, nothing is undercut"

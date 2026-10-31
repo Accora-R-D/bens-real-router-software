@@ -235,8 +235,10 @@ def prepare_part(name, loops, meta=None):
             "maxdim": maxdim, "tab": maxdim < SMALL_PART_MAXDIM,
             "pocket_outlines": pocket_outlines,
             "surface_regions": surface_regions,
-            "model": next((lp["model"] for lp in loops
-                           if lp["role"] == "SURFACE" and lp.get("model") is not None), None),
+            # the 3D part a SURFACE loop was read from — or, for a plate cut as a
+            # board in a 3D job, the solid carried on its OUTSIDE loop
+            "model": next((lp["model"] for lp in sorted(loops, key=lambda lp: lp["role"] != "SURFACE")
+                           if lp.get("model") is not None), None),
             "inner_outlines": inner_outlines, "hole_circles": hole_circles,
             "engrave_strokes": engrave_strokes, "engrave_text": meta.get("label", ""),
             "feature_limits": limits,
@@ -492,6 +494,29 @@ def _scene_part(part, k, dx, dy, thickness):
         elif role in ("OUTSIDE", "OUTSIDE_FIN"):
             ops.append({"op": "profile", "tool": tool, "z": round(final, 2),
                         "pts": [round(c, 2) for p in place(path) for c in p]})
+        # A plate cut as a board in a 3D job: its cut-outs and holes run round at
+        # full depth like the profile; pockets and cleared holes are drawn as the
+        # flat cutter's path at their floor.
+        elif role in ("INSIDE", "INSIDE_FIN", "DRILL"):
+            z = thickness - _pd if isinstance(_pd, (int, float)) and _pd else final
+            ops.append({"op": "profile", "tool": tool, "z": round(z, 2),
+                        "pts": [round(c, 2) for p in place(path) for c in p]})
+        elif role == "PLUNGE":
+            for x, y in place(path):
+                ops.append({"op": "plunge", "tool": tool,
+                            "pts": [round(x, 2), round(y, 2), round(thickness, 2),
+                                    round(x, 2), round(y, 2), round(final, 2)]})
+        elif role == "HOLE_CLEAR":
+            ops.append({"op": "pocket", "tool": tool,
+                        "pts": [round(c, 2) for x, y in place(path) for c in (x, y, final)]})
+        elif role in ("POCKET_BATCH", "POCKET_ISL"):
+            z = thickness - _pd[1]
+            for loop in path:
+                xy = place(loop)
+                if role == "POCKET_ISL":
+                    xy = xy + xy[:1]                       # closed rings
+                ops.append({"op": "pocket", "tool": tool,
+                            "pts": [round(c, 2) for x, y in xy for c in (x, y, z)]})
     return {"name": part["name"], "tris": tris, "ops": ops}
 
 

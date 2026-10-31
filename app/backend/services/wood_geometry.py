@@ -1010,7 +1010,8 @@ def _part_geometry(shape, name: str = "", force_side: "str | None" = None) -> di
             loops[0]["pts"] = merged
         _attach_surface_maps(shape, loops, origin, u, v, normal, thickness)
         return _finish_loops(loops, pockets, up_side, flip, two_sided,
-                             thickness, fragmented, len(unused), far_pockets)
+                             thickness, fragmented, len(unused), far_pockets,
+                             frame=(origin, u, v, normal))
 
     if proud_up:
         return _floors_mode()
@@ -1086,18 +1087,23 @@ def _part_geometry(shape, name: str = "", force_side: "str | None" = None) -> di
     loops.extend(_angled_surface_loops(recs, origin, u, v, normal))
     _attach_surface_maps(shape, loops, origin, u, v, normal, thickness)
     return _finish_loops(loops, pockets, up_side, flip, two_sided,
-                         thickness, fragmented, len(unused), far_pockets)
+                         thickness, fragmented, len(unused), far_pockets,
+                         frame=(origin, u, v, normal))
 
 
 def _finish_loops(loops, pockets, up_side, flip, two_sided,
-                  thickness, fragmented, unmatched, far_pockets=None):
+                  thickness, fragmented, unmatched, far_pockets=None, frame=None):
     """Shift so the part's bounding box starts at (0, 0), matching what the
     exporter's flat outline returns. The two sources are interchangeable to
     everything downstream, so they must not differ in where the origin sits —
     islands and pocket mouths have to move with the profile or they end up
     machined somewhere else entirely. `far_pockets` (the other side's regions,
     already in this frame) get the same shift, or the mould builder would put
-    its floors somewhere else than the part."""
+    its floors somewhere else than the part.
+
+    `frame` (origin, u, v, normal — the frame the loops were read in) comes back
+    with the shift, so the solid itself can be put where its loops are: a 3D
+    job draws a plate it cuts as a board (`wood_3d.plate_model`)."""
     allpts = [p for lp in loops for p in lp["pts"]]
     mnx = min(p[0] for p in allpts)
     mny = min(p[1] for p in allpts)
@@ -1119,4 +1125,7 @@ def _finish_loops(loops, pockets, up_side, flip, two_sided,
     return {"loops": loops, "pockets": pockets, "up_side": up_side, "flip": flip,
             "two_sided": two_sided, "thickness": thickness,
             "fragmented": fragmented, "unmatched_pockets": unmatched,
-            "far_pockets": far_pockets or []}
+            "far_pockets": far_pockets or [],
+            "frame": None if frame is None else {
+                "origin": tuple(frame[0]), "u": tuple(frame[1]), "v": tuple(frame[2]),
+                "normal": tuple(frame[3]), "shift": (mnx, mny)}}

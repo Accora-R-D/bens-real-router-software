@@ -199,8 +199,25 @@ def cam_parts_and_diag(step_parts, decisions=None, names=None, mode="flat"):
         diag.append(row)
 
         if mode == "3d":
-            from .wood_3d import read_geometry_3d
-            loops, geom, why = read_geometry_3d(p)
+            from .wood_3d import read_geometry_3d, looks_3d, plate_model
+            shape = getattr(p, "shape", None)
+            if shape is not None and not looks_3d(shape):
+                # A plain plate in a 3D job (stays and rockers dropped in with a
+                # shaped part): the flat reader lays it on its face and cuts its
+                # profile, pockets, cut-outs and holes — not a heightfield roughed
+                # layer by layer and ball-finished all over.
+                loops, geom, why = _read_geometry(p)
+                if geom and geom.get("frame"):
+                    try:
+                        outer = next(lp for lp in loops if lp["role"] == "OUTSIDE")
+                        outer["model"] = plate_model(shape, geom)
+                    except Exception:                      # noqa: BLE001 - view only
+                        pass
+                    why = "; ".join(w for w in ("a flat plate — cut as a board", why) if w)
+                else:          # the plate read failed: surface it rather than outline it
+                    loops, geom, why = read_geometry_3d(p)
+            else:
+                loops, geom, why = read_geometry_3d(p)
         else:
             loops, geom, why = _read_geometry(p)
         if not any(lp["role"] == "OUTSIDE" for lp in loops):

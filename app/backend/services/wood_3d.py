@@ -105,6 +105,8 @@ def looks_3d(shape) -> bool:
                 ax = (s.Cylinder() if t == ST.GeomAbs_Cylinder else s.Cone()).Axis().Direction()
                 if abs(WG._dot((ax.X(), ax.Y(), ax.Z()), axis)) > 0.99:
                     continue                    # a hole or a rounded corner wall
+            if _square_to(s, axis):
+                continue                        # any wall standing square to the board
         props = GProp_GProps()
         BRepGProp.LinearProperties_s(f, props)
         perim = float(props.Mass())
@@ -112,6 +114,88 @@ def looks_3d(shape) -> bool:
             continue                            # a strip: chamfer or edge round
         shaped += area
     return shaped >= SUGGEST_MIN_AREA_MM2
+
+
+def _square_to(surf, axis, tol=0.02) -> bool:
+    """Is every normal of this face square to the board? A cut-out drawn as a
+    spline in the sketch is a B-spline wall, not a cylinder: 15 mm of it stood
+    straight up through a chainstay plate and counted as shaped surface, so every
+    windowed plate looked 3D and a 3D job stood them on edge."""
+    from OCP.BRepLProp import BRepLProp_SLProps
+    u0, u1 = surf.FirstUParameter(), surf.LastUParameter()
+    v0, v1 = surf.FirstVParameter(), surf.LastVParameter()
+    seen = False
+    for i in range(5):
+        for j in range(5):
+            pr = BRepLProp_SLProps(surf, u0 + (u1 - u0) * (i + 0.5) / 5,
+                                   v0 + (v1 - v0) * (j + 0.5) / 5, 1, 1e-6)
+            if not pr.IsNormalDefined():
+                continue
+            n = pr.Normal()
+            if abs(n.X() * axis[0] + n.Y() * axis[1] + n.Z() * axis[2]) > tol:
+                return False
+            seen = True
+    return seen
+
+
+# A plate in a 3D job is cut as a board (`wood_cam_service`), and the 3D view
+# still wants to draw it: the solid meshed coarser than a footprint needs.
+PLATE_MODEL_DEFLECTION = 0.1
+
+
+def plate_model(shape, geom):
+    """The solid's triangles in a FLAT read's frame, for the 3D job view: x, y
+    as the plate's loops (`geom["frame"]`, shift included), z up from the board
+    bottom with the machined face at the plate's thickness."""
+    import numpy as np
+    from . import wood_geometry as WG
+    fr = geom["frame"]
+    tris = WG._occ_mesh(shape, deflection=PLATE_MODEL_DEFLECTION)["tris"].reshape(-1, 3).astype(float)
+    d = tris - np.asarray(fr["origin"], float)
+    xyz = np.column_stack([d @ np.asarray(fr["u"], float) - fr["shift"][0],
+                           d @ np.asarray(fr["v"], float) - fr["shift"][1],
+                           geom["thickness"] + d @ np.asarray(fr["normal"], float)])
+    return np.round(xyz.reshape(-1, 3, 3), 3)
+
+
+# The machining direction for a shaped part. Most surface reached from above
+# alone stood flat plates on edge — a 15 mm chainstay roughed out of 36 mm
+# stock, a rocker out of 161 mm — because a side view also sees half the
+# window walls, at the price of undercutting the rest. Undercut decides first:
+# any direction leaving no more of it than the best one does (within this
+# slack) is acceptable, and of those the lowest stock wins — the least to rough
+# away. Reach only breaks ties.
+UNDERCUT_SLACK_PCT = 2.0
+# Undercut here leaves out facets within this of vertical (sin of ~6 degrees).
+# A curved wall's mesh joins top and bottom points that do not line up, so a
+# truly square spline window side meshes as facets leaning up to ~4 degrees, and
+# `surface_extract` counts every one as undercut: a flat stay read 5.6 % undercut
+# and was warned about. The cutter's flank grazes those; nothing is left behind.
+WALL_SIN = 0.1
+
+
+def _undercut_pct(mesh, vec):
+    import numpy as np
+    t = mesh["tris"].astype(float)
+    area = np.linalg.norm(np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]), axis=1) / 2.0
+    nm = mesh["fnormals"].astype(float) @ np.asarray(vec, float)
+    under = (nm < -WALL_SIN) & (nm >= -0.98)          # below -0.98 is the bed
+    return 100.0 * float(area[under].sum()) / (float(area.sum()) or 1.0)
+
+
+def _pick_up(mesh, report):
+    """The report candidate to machine from: least undercut, then lowest stock,
+    then most reach. Returned with its own `undercut_pct` (see WALL_SIN)."""
+    import numpy as np
+    pts = mesh["tris"].reshape(-1, 3).astype(float)
+    cands = [dict(c, undercut_pct=_undercut_pct(mesh, c["vector"])) for c in report["candidates"]]
+    least = min(c["undercut_pct"] for c in cands)
+
+    def height(c):
+        h = pts @ np.asarray(c["vector"], float)
+        return float(h.max() - h.min())
+    ok = [c for c in cands if c["undercut_pct"] <= least + UNDERCUT_SLACK_PCT]
+    return min(ok, key=lambda c: (round(height(c)), -c["surfaceable_pct"]))
 
 
 # --------------------------------------------------------------- geometry
@@ -170,7 +254,8 @@ def part_geometry_3d(shape, name: str = "") -> dict:
 
     mesh = WG._occ_mesh(shape, deflection=MESH_DEFLECTION)
     report = SE.orientation_report(mesh)
-    frame = SE.choose_frame(mesh, report["recommended_vector"])
+    up = _pick_up(mesh, report)
+    frame = SE.choose_frame(mesh, up["vector"])
     z = SE._to_frame(mesh["tris"].reshape(-1, 3).astype(float), frame)[:, 2]
     thickness = round(float(z.max()), 3)
     if thickness <= 0.5:
@@ -223,8 +308,8 @@ def part_geometry_3d(shape, name: str = "") -> dict:
                   "steep_cross": True, "model": model})
 
     warnings = []
-    if report["recommended_overhang_pct"] > OVERHANG_WARN_PCT:
-        warnings.append(f"{report['recommended_overhang_pct']:.0f}% of the surface "
+    if up["undercut_pct"] > OVERHANG_WARN_PCT:
+        warnings.append(f"{up['undercut_pct']:.0f}% of the surface "
                         "is undercut and can't be reached from above — it is left "
                         "as the cutter sees it")
     return {"loops": loops, "pockets": [], "up_side": "TOP", "flip": False,
