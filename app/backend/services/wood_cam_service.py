@@ -259,8 +259,17 @@ def cam_parts_and_diag(step_parts, decisions=None, names=None, mode="flat"):
         # operator flips the finished part into it and runs pass 2, which cuts
         # only the far face's recesses. Through-features are already cut in
         # pass 1, so only OUTSIDE (the mould shape) and POCKETs are kept here.
-        if geom and geom.get("two_sided"):
+        # A board chamfered on its far face takes the same route: the bevels
+        # there are pass-2 work, cut with the vee once the part is flipped.
+        ch = (geom or {}).get("chamfers") or {}
+        if ch.get("partial"):
+            row["reason"] = "; ".join(w for w in (row["reason"], (
+                f"{len(ch['partial'])} edge(s) chamfered along only part of their "
+                "length — left square, chamfer those by hand")) if w)
+        if geom and (geom.get("two_sided") or ch.get("far")):
             back_side = "BOT" if geom["up_side"] == "TOP" else "TOP"
+            meta["far_chamfer_only"] = not geom.get("two_sided")
+            what = "chamfers" if meta["far_chamfer_only"] else "pockets"
             try:
                 back = wood_geometry_module().part_geometry(
                     getattr(p, "shape", None), p.name, force_side=back_side)
@@ -268,23 +277,27 @@ def cam_parts_and_diag(step_parts, decisions=None, names=None, mode="flat"):
                     raise wood_geometry_module().GeometryError(
                         f"{back['unmatched_pockets']} far-side recess(es) had "
                         "no matching opening")
+                # Through rings come along only for their bevels: they were cut
+                # in pass 1, and the mould keeps nothing but their chamfers.
                 back_loops = [lp for lp in back["loops"]
-                              if lp["role"] in ("OUTSIDE", "POCKET", "SURFACE")]
-                if len(back_loops) > 1:        # an outline AND something to cut
+                              if lp["role"] in ("OUTSIDE", "POCKET", "SURFACE")
+                              or lp.get("chamfer")]
+                if len(back_loops) > 1 or any(lp.get("chamfer") for lp in back_loops):
+                    # an outline AND something to cut
                     meta["backside_loops"] = back_loops
                     # The NEAR side's regions in the same mirrored frame — they
                     # say where the flipped part is thinner than full stock, so
                     # the mould builder can sculpt a supporting floor when the
                     # full-thickness contact patch is too small to sit on.
                     meta["backside_far"] = back.get("far_pockets") or []
-                    row["reason"] = ("pockets on both faces — pass 1 cuts the "
+                    row["reason"] = (f"{what} on both faces — pass 1 cuts the "
                                      "face-up side plus an inverse mould; flip "
                                      "the part into the mould and run pass 2")
                 else:
-                    row["reason"] = ("pockets on both faces but the far side "
+                    row["reason"] = (f"{what} on both faces but the far side "
                                      "read empty — only the up side is cut")
             except Exception as exc:                       # noqa: BLE001
-                row["reason"] = ("pockets on both faces — far side could not "
+                row["reason"] = (f"{what} on both faces — far side could not "
                                  f"be read ({str(exc)[:80]}); only the up "
                                  "side is cut, the rest needs a second setup")
         out.append((p.name, loops, meta))

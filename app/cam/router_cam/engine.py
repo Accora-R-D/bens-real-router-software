@@ -343,6 +343,12 @@ def _nest_one(parts_loops, material: Material, tools: ToolTable,
                           f"When pass 1 finishes, remove the part (no plug — this mould is "
                           f"all chips), drop it in UPSIDE DOWN, and run the SIDE 2 program "
                           f"without moving the sheet")
+                elif meta.get("far_chamfer_only"):
+                    print(f"    ! {name}: chamfered on BOTH faces — pass 1 cuts the part, its "
+                          f"{meta['up_side']} chamfer and a mould; when it finishes, remove the "
+                          f"part and the mould plug, drop the part in UPSIDE DOWN (a snug fit), "
+                          f"and run the SIDE 2 program without moving the sheet: it chamfers "
+                          f"the other face with the vee")
                 else:
                     print(f"    ! {name}: pockets on BOTH faces — pass 1 cuts the {meta['up_side']} "
                           f"side and an inverse mould; when it finishes, remove the part and the "

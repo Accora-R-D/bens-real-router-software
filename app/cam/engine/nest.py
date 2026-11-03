@@ -409,12 +409,15 @@ def prepare_mould(name, back_loops, meta=None, far_pockets=None, thickness=None)
                           "islands": lp.get("islands") or [], "through": False}
                          for lp in mould_loops if lp["role"] == "POCKET"]
 
-    # pass 2: the far face's recesses only. compute_jobs emits cleared recesses
-    # as POCKET_BATCH/POCKET_ISL and (clearing off) profiled ones as INSIDE
-    # with a depth; anything else (the outline, through cuts) is not pass-2 work.
+    # pass 2: the far face's recesses and modelled chamfers only. compute_jobs
+    # emits cleared recesses as POCKET_BATCH/POCKET_ISL and (clearing off)
+    # profiled ones as INSIDE with a depth, and a bevelled edge as a vee
+    # CHAMFER trace (a bevelled hole as a CSINK); anything else (the outline,
+    # its relief, through cuts) is not pass-2 work.
     all_jobs, _wh = compute_jobs(name, loops, tool_map=meta.get("tool_map"))
     pass2 = [j for j in all_jobs
-             if j[0] in ("POCKET_BATCH", "POCKET_ISL", "POCKET", "SURFACE")
+             if j[0] in ("POCKET_BATCH", "POCKET_ISL", "POCKET", "SURFACE",
+                         "CHAMFER", "CSINK")
              or (j[0] == "INSIDE" and j[2] is not None)]
 
     # plan view: the sculpted floors (inverse mode) plus the pass-2 features —

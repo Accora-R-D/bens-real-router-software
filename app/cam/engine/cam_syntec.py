@@ -1626,23 +1626,50 @@ def compute_jobs(name, loops, base=0.0, tool_map=None):
                   f"~{finfo['scallop_mm']}mm cusp, {finfo['lanes']} lanes")
 
     chamfer_tool = tm.get("chamfer") if tm.get("chamfer") in TOOLS else CHAMFER_TOOL
+    # MODELLED chamfers (wood_geometry._edge_chamfers): a loop whose edge is
+    # bevelled in the STEP carries `chamfer` = {width, angle} and is cut to that
+    # width whatever the edge-break setting says — the part is chamfered
+    # because the model is. The edge-break form still covers the loops the
+    # model left square.
+    modelled = [lp for lp in loops if lp.get("chamfer")]
+    if modelled and chamfer_tool not in TOOLS:
+        print(f"    !! {name}: chamfers modelled but no chamfer or vee tool loaded — "
+              f"chamfers SKIPPED (load a vee in Tools & feeds)")
+    elif modelled:
+        widths = sorted({lp["chamfer"]["width"] for lp in modelled})
+        want = sorted({lp["chamfer"]["angle"] for lp in modelled})
+        if any(abs(a - EDGE_BREAK_ANGLE) > 3.0 for a in want):
+            print(f"    ! {name}: chamfer modelled for a {'/'.join(f'{a:g}' for a in want)}° "
+                  f"vee but the bit is set to {EDGE_BREAK_ANGLE:g}° (edge break angle) — "
+                  f"cut to the modelled width, at the bit's angle")
+        print(f"    i {name}: modelled {'/'.join(f'{w:g}' for w in widths)}mm chamfer "
+              f"on {len(modelled)} edge(s), cut with the vee (T{chamfer_tool:02d})")
     if EDGE_BREAK and EDGE_BREAK_SIZE > 0 and chamfer_tool not in TOOLS:
         print(f"    !! edge break on but no chamfer or vee tool available — "
               f"edge break on {name} SKIPPED")
-    if EDGE_BREAK and chamfer_tool in TOOLS and EDGE_BREAK_SIZE > 0:
-        cd = float(EDGE_BREAK_SIZE)
+    if chamfer_tool in TOOLS and (modelled or (EDGE_BREAK and EDGE_BREAK_SIZE > 0)):
         half = math.radians(max(1.0, min(179.0, EDGE_BREAK_ANGLE)) / 2.0)
         tan_h = math.tan(half) or 1e-6
-        trace_depth = round(cd / tan_h, 3)
         allp = EDGE_BREAK_SCOPE == "all"
+        traced = False
         for lp in loops:
             role, pts = lp["role"], tr(lp["pts"])
+            if lp.get("chamfer"):
+                cd = float(lp["chamfer"]["width"])
+            elif EDGE_BREAK and EDGE_BREAK_SIZE > 0 and (role == "OUTSIDE" or allp):
+                cd = float(EDGE_BREAK_SIZE)
+            else:
+                continue
+            trace_depth = round(cd / tan_h, 3)
             if role == "OUTSIDE":
                 if not SKIP_PROFILE:                       # no profile cut -> no edge to chamfer
                     jobs.append(("CHAMFER", pts, trace_depth, chamfer_tool))
-            elif not allp:
-                continue
-            elif role == "POCKET" or (role == "INSIDE" and not lp.get("circle")):
+                    traced = max(traced or 0.0, trace_depth)
+            elif role == "POCKET" or (role == "INSIDE" and not lp.get("circle")) \
+                    or lp.get("chamfer"):
+                # A modelled hole bevel is traced round the bore like any edge:
+                # countersinking it would sink the point r + width deep — a O20
+                # hole in 12mm board put it through into the spoilboard.
                 jobs.append(("CHAMFER", pts, trace_depth, chamfer_tool))
             elif lp.get("circle"):                          # hole -> countersink with the point
                 cx, cy, r = lp["circle"]
@@ -1653,14 +1680,15 @@ def compute_jobs(name, loops, base=0.0, tool_map=None):
         # a full-width groove through solid stock, and the profile tool comes back
         # afterwards to finish the cut — so the part stays held by the remaining
         # thickness right through the chamfer and only comes free at the very end.
-        pre_depth = round(trace_depth + 1.0, 3)
         # Take the relief from the FINISHED profile, not the roughed one. The vee
         # traces the modelled edge, so if it ran against a wall still carrying its
         # finishing skin the finishing lap would afterwards cut the chamfer off.
-        pre_src = "OUTSIDE_FIN" if any(j[0] == "OUTSIDE_FIN" for j in jobs) else "OUTSIDE"
-        for role, path, _pd, ptool in list(jobs):
-            if role == pre_src:
-                jobs.append(("OUTSIDE_PRE", path, pre_depth, ptool))
+        if traced:
+            pre_depth = round(traced + 1.0, 3)
+            pre_src = "OUTSIDE_FIN" if any(j[0] == "OUTSIDE_FIN" for j in jobs) else "OUTSIDE"
+            for role, path, _pd, ptool in list(jobs):
+                if role == pre_src:
+                    jobs.append(("OUTSIDE_PRE", path, pre_depth, ptool))
 
     # Area-cleared holes run before hole-aware pocket batches; then remaining holes,
     # cut-outs, engraving, profile relief, edge break and the finishing profile.

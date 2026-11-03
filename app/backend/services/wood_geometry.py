@@ -207,13 +207,16 @@ def _classifier(shape):
 
 # ------------------------------------------------------------ 3D surfacing
 
-def _has_freeform(shape, plate_normal) -> bool:
+def _has_freeform(shape, plate_normal, ignore=()) -> bool:
     """Does the solid carry sculpted faces — non-planar geometry that is not a
     hole/fillet wall (a cylinder whose axis runs along the plate normal)?
+    Faces in `ignore` (edge chamfers, see _edge_chamfers) do not count.
     Cached on the shape wrapper via id() for the duration of one extraction."""
     from OCP.BRepAdaptor import BRepAdaptor_Surface
     from OCP.GeomAbs import GeomAbs_SurfaceType
     for f in _faces(shape):
+        if any(f.IsSame(g) for g in ignore):
+            continue
         s = BRepAdaptor_Surface(f)
         t = s.GetType()
         if t == GeomAbs_SurfaceType.GeomAbs_Plane:
@@ -244,15 +247,18 @@ def _occ_mesh(shape, deflection=0.15, angular=0.35):
     return {"tris": tris.astype(np.float32), "fnormals": (n / ln).astype(np.float32)}
 
 
-def _angled_surface_loops(recs, origin, u, v, normal, min_area=25.0):
+def _angled_surface_loops(recs, origin, u, v, normal, min_area=25.0, ignore=()):
     """SURFACE regions for ANGLED planar faces — neither plate-parallel nor a
     wall (5..85 degrees to the machined normal), facing the machined side.
     A 45-degree ramp at a rebate end is a plane, so the freeform detector
     never fires, and the region was silently left as a square shoulder. Its
     footprint ring drives the same drop-cutter rough + ball finish as a
-    sculpted surface."""
+    sculpted surface. Faces in `ignore` are edge chamfers, cut with the vee
+    instead (see _edge_chamfers)."""
     out = []
     for r in recs:
+        if any(r["_occ"].IsSame(g) for g in ignore):
+            continue
         n = (r["surface"]["normal"]["x"], r["surface"]["normal"]["y"],
              r["surface"]["normal"]["z"])
         d = _dot(n, normal)
@@ -268,6 +274,240 @@ def _angled_surface_loops(recs, origin, u, v, normal, min_area=25.0):
             out.append({"role": "SURFACE", "pts": ring, "circle": None,
                         "isOuter": False})
     return out
+
+
+# ------------------------------------------------------------ edge chamfers
+
+# mm. An edge chamfer is a narrow bevel along a THROUGH edge — the outline, a
+# slot, a hole — reaching from a plate face to the wall. Anything wider or
+# deeper is a shaped surface and stays one.
+CHAMFER_MAX_MM = 10.0
+# A ring counts as chamfered when bevels run along this much of it. A bevel on
+# only part of an edge is left square rather than cut all round, which would
+# take material the model keeps.
+CHAMFER_COVER_MIN = 0.9
+# A bevel's points must come this close to the through wall: its foot is ON
+# the wall, give or take two chord samplings of the same edge.
+_CHAMFER_FOOT_MM = 0.15
+
+
+def _face_points3d(face):
+    """Points along every edge of a face, in mm. A straight edge samples to its
+    two ends, and a bevel's ends sit ON the outline where it meets the next
+    side, so its width read as nothing: every edge also gets points along it."""
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.GCPnts import GCPnts_QuasiUniformDeflection
+    from OCP.TopAbs import TopAbs_ShapeEnum
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+    pts = []
+    exp = TopExp_Explorer(face, TopAbs_ShapeEnum.TopAbs_EDGE)
+    while exp.More():
+        edge = TopoDS.Edge_s(exp.Current())
+        exp.Next()
+        if BRep_Tool.Degenerated_s(edge):
+            continue
+        c = BRepAdaptor_Curve(edge)
+        try:
+            s = GCPnts_QuasiUniformDeflection(c, CHORD_TOL_MM,
+                                              c.FirstParameter(), c.LastParameter())
+            seq = [c.Value(s.Parameter(i + 1)) for i in range(s.NbPoints())]
+        except Exception:                                  # noqa: BLE001 - kernel
+            seq = [c.Value(c.FirstParameter()), c.Value(c.LastParameter())]
+        a, b = c.FirstParameter(), c.LastParameter()
+        seq += [c.Value(a + (b - a) * i / 8.0) for i in range(1, 8)]
+        pts += [(p.X(), p.Y(), p.Z()) for p in seq]
+    return pts
+
+
+def _edge_chamfers(shape, origin, u, v, normal, thickness):
+    """Modelled edge chamfers, read from the solid. None when there are none.
+
+    A chamfered plate's machined face is INSET by the chamfer: its outer wire
+    runs along the top of the bevel, so the profile cut along it came out a
+    chamfer-width undersize all round (Part 13: 371 x 896 for a 375 x 900
+    board), and the bevels were taken for sculpted regions and skipped for
+    want of a ball nose. The true through-boundary is the board's mid-depth
+    cross-section; every bevel stands on one of its rings.
+
+    A face is a bevel on the NEAR (machined) face when it reaches that face and
+    goes no deeper than CHAMFER_MAX_MM, and every point of it lies within
+    CHAMFER_MAX_MM of one mid-section ring, touching it at its foot; likewise
+    for the FAR face. Plate faces, walls (planes along the normal) and hole /
+    fillet walls (cylinders along the normal) are never bevels.
+
+    Returns {region, rings: [ring pts], faces: [occ faces],
+             near: {ring index: {width, depth, cover}}, far: {...}}; the width
+    is the bevel's reach in from the wall, the depth its height, and `cover`
+    the fraction of the ring the bevels run along."""
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.GeomAbs import GeomAbs_SurfaceType
+    from shapely.geometry import Point, Polygon, MultiPolygon
+
+    T = float(thickness)
+    lim = min(CHAMFER_MAX_MM, T / 2.0 - 0.2)
+    if lim <= 0.1:
+        return None
+    cands = []
+    for f in _faces(shape):
+        s = BRepAdaptor_Surface(f)
+        t = s.GetType()
+        if t == GeomAbs_SurfaceType.GeomAbs_Plane:
+            pl = _plane_of(f)
+            if pl and not (0.087 <= abs(_dot(pl[1], normal)) <= 0.996):
+                continue
+        elif t == GeomAbs_SurfaceType.GeomAbs_Cylinder:
+            d = s.Cylinder().Axis().Direction()
+            if abs(d.X() * normal[0] + d.Y() * normal[1] + d.Z() * normal[2]) > 0.99:
+                continue
+        cands.append(f)
+    if not cands:
+        return None
+
+    try:
+        prepared = _slice(shape, origin, u, v, normal, T / 2.0)
+    except Exception:                                      # noqa: BLE001 - kernel
+        prepared = None
+    if prepared is None:
+        return None
+    geom = prepared.context
+    polys = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
+    rings = []
+    for pg in polys:
+        if isinstance(pg, Polygon) and not pg.is_empty:
+            rings.append(pg.exterior)
+            rings.extend(pg.interiors)
+    if not rings:
+        return None
+
+    found = {"near": {}, "far": {}}
+    faces = []
+    for f in cands:
+        p3 = _face_points3d(f)
+        if len(p3) < 2:
+            continue
+        # depth below the machined face, 0 at it, T at the far face
+        dz = [sum((origin[i] - p[i]) * normal[i] for i in range(3)) for p in p3]
+        if min(dz) <= 0.05 and max(dz) <= lim:
+            side, depth = "near", max(dz)
+        elif max(dz) >= T - 0.05 and min(dz) >= T - lim:
+            side, depth = "far", T - min(dz)
+        else:
+            continue
+        if depth < 0.05:
+            continue
+        p2 = [Point(_project(p, origin, u, v)) for p in p3]
+        best = None
+        for k, ring in enumerate(rings):
+            ds = [ring.distance(q) for q in p2]
+            if best is None or max(ds) < best[1]:
+                best = (k, max(ds), min(ds))
+        k, width, foot = best
+        if width > CHAMFER_MAX_MM or width < 0.05 or foot > _CHAMFER_FOOT_MM:
+            continue
+        faces.append(f)
+        # length of edge this bevel runs along: its area over its slant
+        run = _area_mm2(f) / math.hypot(width, depth)
+        e = found[side].setdefault(k, {"w": [], "d": [], "run": 0.0})
+        if _area_mm2(f) >= 1.0:                    # corner blend slivers do not vote
+            e["w"].append((width, run))
+            e["d"].append((depth, run))
+        e["run"] += run
+    if not faces:
+        return None
+
+    def wmedian(vals):
+        vals = sorted(vals)
+        half = sum(w for _v, w in vals) / 2.0
+        acc = 0.0
+        for val, w in vals:
+            acc += w
+            if acc >= half:
+                return val
+        return vals[-1][0]
+
+    out = {"region": geom, "rings": [list(r.coords)[:-1] for r in rings],
+           "faces": faces, "near": {}, "far": {}}
+    for side in ("near", "far"):
+        for k, e in found[side].items():
+            if not e["w"]:
+                continue
+            out[side][k] = {"width": round(wmedian(e["w"]), 3),
+                            "depth": round(wmedian(e["d"]), 3),
+                            "cover": min(1.0, e["run"] / max(rings[k].length, 1e-9)),
+                            "spread": round(max(w for w, _r in e["w"])
+                                            - min(w for w, _r in e["w"]), 3)}
+    return out
+
+
+def _apply_chamfers(loops, ch):
+    """Put a chamfered plate's loops on its TRUE boundary and tag the bevels.
+
+    The OUTSIDE (and every through ring a bevel stands on) is replaced by the
+    mid-section ring under it, and each chamfered loop carries
+    `chamfer` / `chamfer_far` = {width, angle} for the machined and the far
+    face. `angle` is the included angle of the vee that cuts it as modelled
+    (90 for a 45-degree bevel). Returns (n_near, n_far, partial) where
+    `partial` lists rings bevelled along less than CHAMFER_COVER_MIN of their
+    length — left square, and said so."""
+    from .wood_cam_service import _circle
+    from shapely.geometry import Point, Polygon
+    rings = ch["rings"]
+    polys = [Polygon(r) for r in rings]
+    used = set()
+
+    def match(lp):
+        if lp["role"] == "OUTSIDE":
+            k = max(range(len(rings)), key=lambda i: abs(_area2d(rings[i])))
+            return k
+        a = abs(_area2d(lp["pts"]))
+        lpoly = Polygon(lp["pts"])
+        for k, pg in enumerate(polys):
+            if k in used:
+                continue
+            b = abs(pg.area)
+            if b < 1e-6 or not (0.3 < a / b < 3.0):
+                continue
+            if lpoly.contains(pg.representative_point()) or \
+                    pg.contains(lpoly.representative_point()):
+                return k
+        return None
+
+    n_near = n_far = 0
+    partial = []
+    for lp in loops:
+        if lp["role"] not in ("OUTSIDE", "INSIDE", "DRILL"):
+            continue
+        k = match(lp)
+        if k is None:
+            continue
+        sides = {s: ch[s][k] for s in ("near", "far") if k in ch[s]}
+        if not sides:
+            continue
+        used.add(k)
+        lp["pts"] = list(rings[k])
+        if lp["role"] == "DRILL" or lp.get("circle"):
+            circ = _circle(lp["pts"])
+            if circ:
+                lp["circle"] = circ
+            else:                            # a bevelled ring that is not round
+                lp["role"], lp["circle"] = "INSIDE", None
+        for s, key in (("near", "chamfer"), ("far", "chamfer_far")):
+            c = sides.get(s)
+            if not c:
+                continue
+            if c["cover"] < CHAMFER_COVER_MIN:
+                partial.append((s, lp["role"], round(c["cover"] * 100)))
+                continue
+            lp[key] = {"width": round(c["width"], 2),
+                       "angle": round(2.0 * math.degrees(math.atan2(c["width"], c["depth"])), 1),
+                       "spread": c["spread"]}
+            if s == "near":
+                n_near += 1
+            else:
+                n_far += 1
+    return n_near, n_far, partial
 
 
 def _attach_surface_maps(shape, loops, origin, u, v, normal, thickness):
@@ -849,6 +1089,29 @@ def _part_geometry(shape, name: str = "", force_side: "str | None" = None) -> di
                 tuple(-sa * u[i] + ca * v[i] for i in range(3)))
         outer, inner = face_loops(up_face, origin, u, v)
 
+    # Modelled edge chamfers (see _edge_chamfers): their faces are bevels for
+    # the vee, never sculpted regions, and the loops they stand on are moved to
+    # the true through-boundary before the part is finished. A boss part's
+    # machined face is the boss top, not a plate face, so it is not read here.
+    chamfers = None
+    if not mains.get("proud"):
+        try:
+            chamfers = _edge_chamfers(shape, origin, u, v, normal, thickness)
+        except Exception:                                  # noqa: BLE001 - kernel
+            chamfers = None
+    bevels = chamfers["faces"] if chamfers else ()
+
+    def _finish(loops, unmatched):
+        info = None
+        if chamfers:
+            n_near, n_far, partial = _apply_chamfers(loops, chamfers)
+            info = {"near": n_near, "far": n_far, "partial": partial}
+        out = _finish_loops(loops, pockets, up_side, flip, two_sided,
+                            thickness, fragmented, unmatched, far_pockets,
+                            frame=(origin, u, v, normal))
+        out["chamfers"] = info
+        return out
+
     # On a forced read (the flip-jig reads a two-sided part from both faces),
     # also project the OTHER side's pocket regions into THIS frame. They tell
     # the mould builder where the flipped part is thinner than full stock —
@@ -986,7 +1249,7 @@ def _part_geometry(shape, name: str = "", force_side: "str | None" = None) -> di
         _skip, up_bores = _split_floor_wires(shape, uniq,
                                              origin, u, v, normal, 0.0, thickness)
         loops.extend(up_bores)
-        loops.extend(_angled_surface_loops(recs, origin, u, v, normal))
+        loops.extend(_angled_surface_loops(recs, origin, u, v, normal, ignore=bevels))
         # A half-lap bar is rebated at BOTH ends on OPPOSITE faces, so EVERY
         # main face is missing an end and "the biggest face" is still short —
         # the profile cut along it severed the lap (and its bolt holes) clean
@@ -1009,9 +1272,7 @@ def _part_geometry(shape, name: str = "", force_side: "str | None" = None) -> di
         if merged and _area2d(merged) > _area2d(fp) + 1.0:
             loops[0]["pts"] = merged
         _attach_surface_maps(shape, loops, origin, u, v, normal, thickness)
-        return _finish_loops(loops, pockets, up_side, flip, two_sided,
-                             thickness, fragmented, len(unused), far_pockets,
-                             frame=(origin, u, v, normal))
+        return _finish(loops, len(unused))
 
     if proud_up:
         return _floors_mode()
@@ -1062,7 +1323,7 @@ def _part_geometry(shape, name: str = "", force_side: "str | None" = None) -> di
         # region (a dished seat, a formed relief) — before 3D surfacing existed
         # this fell through to INSIDE and the sculpt was CUT OUT of the part as
         # a slug. Probe the solid: through features are empty all the way down.
-        if _has_freeform(shape, normal) and len(ring) >= 3:
+        if _has_freeform(shape, normal, ignore=bevels) and len(ring) >= 3:
             cx = sum(q[0] for q in ring) / len(ring)
             cy = sum(q[1] for q in ring) / len(ring)
             if any(_solid_below(shape, origin, u, v, normal, (cx, cy), drop)
@@ -1084,11 +1345,9 @@ def _part_geometry(shape, name: str = "", force_side: "str | None" = None) -> di
     if unused:
         return _floors_mode()
 
-    loops.extend(_angled_surface_loops(recs, origin, u, v, normal))
+    loops.extend(_angled_surface_loops(recs, origin, u, v, normal, ignore=bevels))
     _attach_surface_maps(shape, loops, origin, u, v, normal, thickness)
-    return _finish_loops(loops, pockets, up_side, flip, two_sided,
-                         thickness, fragmented, len(unused), far_pockets,
-                         frame=(origin, u, v, normal))
+    return _finish(loops, len(unused))
 
 
 def _finish_loops(loops, pockets, up_side, flip, two_sided,
