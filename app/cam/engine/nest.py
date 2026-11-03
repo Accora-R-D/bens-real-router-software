@@ -443,6 +443,16 @@ def prepare_mould(name, back_loops, meta=None, far_pockets=None, thickness=None)
             "flip": False, "two_sided": False, "up_side": "TOP"}
 
 
+def _chamfer_view(role, path, depth, side):
+    """A vee pass for the plan view. The vee traces the edge itself, so its path
+    IS the chamfered edge; a countersink is a point. `side` 2 is cut in the
+    SIDE 2 program, with the part flipped into its mould."""
+    if role == "CSINK":
+        x, y = path[0]
+        return {"point": [round(x, 2), round(y, 2)], "depth": depth, "side": side}
+    return {"path": _decim(path), "depth": depth, "side": side}
+
+
 def _rectpoly(b):
     """A blocked/used rectangle {x,y,w,h} (sheet coords) -> closed polygon."""
     x, y, w, h = b["x"], b["y"], b["w"], b["h"]
@@ -698,7 +708,7 @@ def nest_and_emit(parts, thickness, prefix, sheet_w=SHEET_W, sheet_h=SHEET_H,
                   "flip": part.get("flip", False), "two_sided": part.get("two_sided", False),
                   "up_side": part.get("up_side", "TOP"), "engrave_text": part.get("engrave_text", ""),
                   "outline": [], "cutouts": [], "pockets": [], "drills": [], "tabs": [],
-                  "engrave": [], "toolpath": [],
+                  "engrave": [], "toolpath": [], "chamfers": [],
                   "origin": [round(dx, 2), round(dy, 2)]}
             if part.get("mould"):
                 lp["mould"] = True
@@ -715,6 +725,8 @@ def nest_and_emit(parts, thickness, prefix, sheet_w=SHEET_W, sheet_h=SHEET_H,
                 else:
                     tp2 = [(x+dx, y+dy) for x, y in rot(path, k)]
                 all_jobs2.append((role, tp2, pd, tool, False))
+                if role in ("CHAMFER", "CSINK"):
+                    lp["chamfers"].append(_chamfer_view(role, tp2, pd, side=2))
             for role, path, pd, tool in part["jobs"]:
                 if role == "SURFACE":       # (x,y,z) polylines: rotate xy, keep z
                     tp = [[(rx+dx, ry+dy, q[2]) for (rx, ry), q in
@@ -742,6 +754,8 @@ def nest_and_emit(parts, thickness, prefix, sheet_w=SHEET_W, sheet_h=SHEET_H,
                 elif role in ("INSIDE", "INSIDE_FIN", "POCKET"):
                     lp["toolpath"].append(_decim(tp))
                 elif role == "ENGRAVE": lp["engrave"].append(_decim(tp))
+                elif role in ("CHAMFER", "CSINK"):
+                    lp["chamfers"].append(_chamfer_view(role, tp, pd, side=1))
                 if backplot:
                     if role in ("POCKET_ISL", "POCKET_BATCH", "SURFACE"):
                         for loop in tp:

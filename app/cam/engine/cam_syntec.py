@@ -1645,8 +1645,8 @@ def compute_jobs(name, loops, base=0.0, tool_map=None):
         print(f"    i {name}: modelled {'/'.join(f'{w:g}' for w in widths)}mm chamfer "
               f"on {len(modelled)} edge(s), cut with the vee (T{chamfer_tool:02d})")
     if EDGE_BREAK and EDGE_BREAK_SIZE > 0 and chamfer_tool not in TOOLS:
-        print(f"    !! edge break on but no chamfer or vee tool available — "
-              f"edge break on {name} SKIPPED")
+        print(f"    !! chamfer override on but no chamfer or vee tool available — "
+              f"override chamfer on {name} SKIPPED")
     if chamfer_tool in TOOLS and (modelled or (EDGE_BREAK and EDGE_BREAK_SIZE > 0)):
         half = math.radians(max(1.0, min(179.0, EDGE_BREAK_ANGLE)) / 2.0)
         tan_h = math.tan(half) or 1e-6

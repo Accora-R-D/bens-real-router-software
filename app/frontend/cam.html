@@ -42,7 +42,8 @@
   --f-mould-fill:  rgba(217,123,224,.12);
   --f-surface:     #e5e7eb;   /* 3D surfaced region (ball-nose raster); silver, clear of every other hue */
   --f-surface-fill:rgba(229,231,235,.14);
-  --f-origin:      #f0705f;   /* machine origin, axes and the border line */
+  --f-chamfer:     #fde047;   /* edges the vee chamfers (on a mould: its SIDE 2 chamfers) */
+  --f-origin:     #f0705f;   /* machine origin, axes and the border line */
 }
 * , *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body {
@@ -210,6 +211,7 @@ body.mode3d #view3dpane { display: block; }
 .legend .l-path::before    { background: var(--f-path); }
 .legend .l-mould::before   { background: var(--f-mould); }
 .legend .l-surface::before { background: var(--f-surface); }
+.legend .l-chamfer::before { background: var(--f-chamfer); }
 /* Pocket depths are revealed on hover, as an arrowed callout OUT in the margin —
    a number sat on the recess itself was hard to read over the parts. */
 g.pocket .pkcall { opacity: 0; pointer-events: none; transition: opacity .12s ease; }
@@ -336,6 +338,7 @@ body.mode3d .flat-only { display: none !important; }
           <span class="l-blind">2.5D — counterbores &amp; blind pockets</span>
           <span class="l-mould" id="legmould" hidden>two-sided mould — flip the part in for pass&nbsp;2</span>
           <span class="l-surface" id="legsurface" hidden>3D surfaced (ball nose)</span>
+          <span class="l-chamfer" id="legchamfer" hidden>chamfered edge (vee)</span>
           <span class="l-tab">tabs</span>
           <span class="l-path">toolpath</span>
         </div>
@@ -531,7 +534,10 @@ body.mode3d .flat-only { display: none !important; }
         <div class="hr"></div>
 
         <h3 class="sub">Edge break (chamfer)</h3>
-        <label class="check"><input type="checkbox" id="edgebreak"> Chamfer edges</label>
+        <label class="check"><input type="checkbox" id="edgebreak"> Chamfer Edges Override</label>
+        <p class="note" style="margin-top:6px">Chamfers modelled in the STEP are found and cut
+          automatically, at their own size, on both faces. Tick this only to add chamfers the
+          model doesn't have.</p>
         <div class="row" style="margin-top:12px">
           <label class="field">Tool<select id="chamfertool"></select></label>
           <label class="field">Bit angle (deg)
@@ -1525,6 +1531,8 @@ function drawPlan() {
   if (lm) lm.hidden = !placed.some(p => p.mould);
   const ls = $("legsurface");
   if (ls) ls.hidden = !placed.some(p => (p.surface || []).length);
+  const lc = $("legchamfer");
+  if (lc) lc.hidden = !placed.some(p => (p.chamfers || []).length);
   // Drawn in MACHINE coordinates: a portrait bed, origin at the bottom-left, +X to
   // the right, +Y up the long axis, tool changer along the top edge. The nest is
   // computed in sheet coordinates and the post rotates it into this frame when Swap
@@ -1626,6 +1634,20 @@ function drawPlan() {
     for (const st of part.engrave || [])
       b += `<polyline points="${st.map(px).join(" ")}" fill="none"
               stroke="var(--text)" stroke-width="1.2"/>`;
+    // Chamfers on top of everything: the vee traces the edge itself, so its pass
+    // is drawn as the edge it bevels — on a mould, the SIDE 2 chamfers of the
+    // part flipped into it. A countersunk hole is a ring at its centre.
+    for (const ch of part.chamfers || []) {
+      const tip = `<title>${ch.side === 2 ? "SIDE 2 chamfer" : "chamfer"}, vee ${ch.depth}mm deep</title>`;
+      if (ch.point) {
+        const c5 = M(ch.point);
+        b += `<circle cx="${c5[0]}" cy="${Y(c5[1])}" r="${Math.max(4, bedH / 400)}" fill="none"
+                stroke="var(--f-chamfer)" stroke-width="2.4">${tip}</circle>`;
+      } else if (ch.path && ch.path.length > 1) {
+        b += `<polygon points="${ch.path.map(px).join(" ")}" fill="none"
+                stroke="var(--f-chamfer)" stroke-width="2.6">${tip}</polygon>`;
+      }
+    }
     g += `<g class="part" data-uid="${esc(part.uid || part.name)}"
              data-name="${esc(part.name)}" data-rot="${part.rotation_deg || 0}">
             ${b}<title>${esc(part.name)} — drag to reposition</title></g>`;
