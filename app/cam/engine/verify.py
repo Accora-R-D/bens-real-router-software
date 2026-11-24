@@ -157,9 +157,17 @@ def check(path, stock_top, sheet_w, sheet_h, final_z_expected, clearance, expect
     if mode == "surface" and zmap is not None and grid is not None and cutter is not None:
         fails += gouge_violations(recs, zmap, grid, cutter, tol_gouge)
 
+    # A program with no moves at all is not safe or unsafe, it is empty: nothing was
+    # placed (a part too big for the sheet). It used to crash here on min() of
+    # nothing, and the operator saw "min() iterable argument is empty".
+    if not xs:
+        fails.append("no toolpath: nothing was placed on the sheet "
+                     "(a part bigger than the sheet allows is skipped - see the warnings)")
     n_rapid_clear = sum(1 for r in recs if r["g"] == 0 and abs(r["z"]-clearance) < 0.1)
+    extent = (f"X[{min(xs):.0f},{max(xs):.0f}] Y[{min(ys):.0f},{max(ys):.0f}]" if xs
+              else "no moves")
     print(f"  {Path(path).name}: {len(recs)} moves, {n_rapid_clear} retracts, "
-          f"deepest cut Z{min_cut_z:.2f}, X[{min(xs):.0f},{max(xs):.0f}] Y[{min(ys):.0f},{max(ys):.0f}]")
+          f"deepest cut Z{min_cut_z:.2f}, {extent}")
     for w in warns:
         print(f"    WARN  {w}")
     for fl in fails:

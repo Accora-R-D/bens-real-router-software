@@ -533,6 +533,36 @@ def _scene_part(part, k, dx, dy, thickness):
     return {"name": part["name"], "tris": tris, "ops": ops}
 
 
+# A part the size of the whole sheet cannot be profiled: the cutter runs one radius
+# outside the outline, off the board. Its outside needs no cutting anyway — the
+# sheet's factory edges ARE its edges — so it is placed square in the X0/Y0 corner
+# and machined without its outer profile (Part 13, a full 2440x1220 MDF panel,
+# 2026-11-24: the nest skipped it as too big and the empty program crashed the gate).
+FULL_SHEET_TOL = 0.5      # mm: outline vs sheet, each way
+_OUTER_ROLES = ("OUTSIDE", "OUTSIDE_FIN", "OUTSIDE_PRE")
+
+
+def full_sheet_rotation(part, sheet_w, sheet_h, rotations=(0, 1, 2, 3)):
+    """The 90-degree step that lays `part` exactly over the sheet, or None. Only a
+    plain rectangle qualifies: every outline point on its bounding box (a notch or
+    shaped edge must be cut, and the factory edge cannot make it)."""
+    fp = part.get("footprint") or []
+    if len(fp) < 4 or part.get("mould") or part.get("two_sided"):
+        return None
+    minx, miny, maxx, maxy = bbox(fp)
+    w, h = maxx - minx, maxy - miny
+    t = FULL_SHEET_TOL
+    if any(min(abs(x - minx), abs(x - maxx), abs(y - miny), abs(y - maxy)) > t for x, y in fp):
+        return None
+    if abs(abs(_poly_area(fp)) - w * h) > t * (w + h):
+        return None
+    for k in rotations:
+        rw, rh = (w, h) if k % 2 == 0 else (h, w)
+        if abs(rw - sheet_w) <= t and abs(rh - sheet_h) <= t:
+            return k
+    return None
+
+
 def nest_and_emit(parts, thickness, prefix, sheet_w=SHEET_W, sheet_h=SHEET_H,
                   blocked=None, tabs_mode=None, backplot=True,
                   auto_part=False, part_cuts=None, grain_locked=False, swap_xy=False,
@@ -592,12 +622,33 @@ def nest_and_emit(parts, thickness, prefix, sheet_w=SHEET_W, sheet_h=SHEET_H,
     sheets = [[]]; placedpolys = [list(block_polys)]   # seed sheet 1 with used areas
     sheet_uids = [[]]
     pin_refused = []
+    # Whole-sheet parts first, each on a sheet of its own (see FULL_SHEET_TOL).
+    full = {}
+    for part, uid in zip(parts, uids):
+        k = full_sheet_rotation(part, sheet_w, sheet_h, rotations)
+        if k is None:
+            continue
+        full[uid] = k
+        fp = rot(part["footprint"], k)
+        fminx, fminy, _fmaxx, _fmaxy = bbox(fp)
+        dx, dy = -fminx, -fminy
+        cand = [(x + dx, y + dy) for x, y in fp]
+        bare = dict(part, jobs=[j for j in part["jobs"] if j[0] not in _OUTER_ROLES],
+                    tab=False, full_sheet=True)
+        if sheets[0] or blocked:
+            sheets.append([]); placedpolys.append([]); sheet_uids.append([])
+        si = len(sheets) - 1
+        sheets[si].append((bare, k, dx, dy)); placedpolys[si].append((cand, bbox(cand)))
+        sheet_uids[si].append(uid)
+        print(f"  ! {part['name']} is the whole {sheet_w:g}x{sheet_h:g} sheet: its outside is "
+              f"NOT cut - the sheet's own edges are its edges, so square the sheet into the "
+              f"X0/Y0 corner. Only its holes, pockets and cut-outs are machined.")
     # Pinned copies are seated FIRST, on sheet 1, so the auto-nest fills around them
     # rather than the other way round.
     pinned_ok = set()
     for part, uid in zip(parts, uids):
         pin = pins.get(uid)
-        if pin is None:
+        if pin is None or uid in full:
             continue
         k = int(pin.get("rot", 0)) // 90 % 4
         if grain_locked and k % 2:
@@ -623,7 +674,7 @@ def nest_and_emit(parts, thickness, prefix, sheet_w=SHEET_W, sheet_h=SHEET_H,
         sheets[0].append((part, k, dx, dy)); placedpolys[0].append((cand, cb))
         sheet_uids[0].append(uid); pinned_ok.add(uid)
     for part, uid in zip(parts, uids):
-        if uid in pinned_ok:
+        if uid in pinned_ok or uid in full:
             continue
         done = False
         for si in range(len(sheets)):
